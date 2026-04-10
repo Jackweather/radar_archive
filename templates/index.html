@@ -6,12 +6,15 @@
   <title>Radar Archive Viewer</title>
   <style>
     :root {
-      --bg: #eef3f8;
-      --panel: rgba(255, 255, 255, 0.9);
-      --text: #162330;
-      --muted: #5f7182;
-      --accent: #0b6bcb;
-      --border: rgba(22, 35, 48, 0.12);
+      color-scheme: dark;
+      --bg: #08111f;
+      --panel: rgba(10, 19, 35, 0.92);
+      --panel-strong: rgba(6, 13, 25, 0.96);
+      --text: #f3f7ff;
+      --muted: #9db1cc;
+      --accent: #66d9ef;
+      --border: rgba(157, 177, 204, 0.22);
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
     }
 
     * {
@@ -20,148 +23,376 @@
 
     body {
       margin: 0;
-      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
       color: var(--text);
       background:
-        radial-gradient(circle at top left, rgba(11, 107, 203, 0.18), transparent 30%),
-        radial-gradient(circle at top right, rgba(13, 148, 136, 0.16), transparent 26%),
-        linear-gradient(180deg, #f8fbfe 0%, var(--bg) 100%);
-      min-height: 100vh;
-    }
-
-    main {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 24px;
-    }
-
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 18px 50px rgba(27, 39, 51, 0.08);
-    }
-
-    .controls {
-      display: grid;
-      grid-template-columns: 240px 1fr;
-      gap: 20px;
-      padding: 20px;
-      margin-bottom: 20px;
-      align-items: end;
-    }
-
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    label {
-      font-size: 0.9rem;
-      font-weight: 600;
-    }
-
-    select,
-    input[type="range"] {
-      width: 100%;
-    }
-
-    select {
-      padding: 10px 12px;
-      border-radius: 12px;
-      border: 1px solid var(--border);
-      background: white;
-      color: var(--text);
-    }
-
-    .meta {
-      display: flex;
-      justify-content: space-between;
-      color: var(--muted);
-      font-size: 0.92rem;
+        radial-gradient(circle at top, rgba(102, 217, 239, 0.12), transparent 32%),
+        linear-gradient(180deg, #10213d 0%, var(--bg) 38%, #050a12 100%);
     }
 
     .viewer {
-      padding: 20px;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      min-height: 100vh;
     }
 
-    .viewer img {
+    .viewer.is-loading .controls {
+      pointer-events: none;
+      opacity: 0.6;
+    }
+
+    .stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px 20px 0;
+      min-height: 0;
+    }
+
+    .image-shell {
+      position: relative;
       width: 100%;
-      height: auto;
-      display: block;
-      border-radius: 16px;
+      height: calc(100vh - 116px);
       border: 1px solid var(--border);
-      background: white;
+      border-radius: 18px;
+      overflow: hidden;
+      background: rgba(4, 10, 20, 0.78);
+      box-shadow: var(--shadow);
     }
 
-    .empty {
-      padding: 60px 24px;
+    .image-shell img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    .loading-screen {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 32px;
+      background:
+        linear-gradient(180deg, rgba(6, 13, 25, 0.84), rgba(3, 8, 16, 0.94)),
+        radial-gradient(circle at top, rgba(102, 217, 239, 0.18), transparent 40%);
+      z-index: 5;
+      transition: opacity 220ms ease, visibility 220ms ease;
+    }
+
+    .loading-screen.is-hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .loading-card {
+      width: min(420px, 100%);
+      padding: 24px 22px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: rgba(8, 16, 30, 0.88);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.35);
+      text-align: center;
+    }
+
+    .loading-spinner {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 18px;
+      border-radius: 50%;
+      border: 3px solid rgba(102, 217, 239, 0.18);
+      border-top-color: var(--accent);
+      animation: spin 0.9s linear infinite;
+    }
+
+    .loading-title {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .loading-copy {
+      margin: 10px 0 18px;
+      color: var(--muted);
+      font-size: 0.96rem;
+      line-height: 1.5;
+    }
+
+    .loading-progress {
+      display: grid;
+      gap: 10px;
+    }
+
+    .loading-bar {
+      width: 100%;
+      height: 10px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .loading-bar-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #4bc0d9 0%, #8ef6ff 100%);
+      transition: width 160ms ease;
+    }
+
+    .loading-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .empty-state {
+      display: grid;
+      place-items: center;
+      width: 100%;
+      height: 100%;
+      padding: 32px;
       text-align: center;
       color: var(--muted);
-      font-size: 1rem;
+      font-size: 1.1rem;
     }
 
-    .title {
-      margin: 0 0 6px;
-      font-size: 1.5rem;
+    .is-hidden {
+      display: none !important;
     }
 
-    .subtitle {
-      margin: 0 0 20px;
+    .controls {
+      position: sticky;
+      bottom: 0;
+      display: grid;
+      gap: 6px;
+      padding: 10px 12px 6px;
+      background: var(--panel-strong);
+      border-top: 1px solid var(--border);
+      box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.22);
+    }
+
+    .control-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+      gap: 8px;
+      align-items: center;
+      margin-top: 2px;
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
+
+    select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 0.9rem;
+      color-scheme: dark;
+      appearance: none;
+    }
+
+    select option {
+      background: #0b1628;
+      color: var(--text);
+    }
+
+    select:focus,
+    input[type="range"]:focus {
+      outline: 2px solid rgba(102, 217, 239, 0.45);
+      outline-offset: 2px;
+    }
+
+    .slider-row {
+      display: grid;
+      gap: 6px;
+      align-items: center;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+      margin: 0;
+    }
+
+    .footer-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-size: 0.78rem;
       color: var(--muted);
     }
 
-    @media (max-width: 800px) {
-      .controls {
-        grid-template-columns: 1fr;
+    .footer-meta strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    @media (max-width: 720px) {
+      .stage {
+        padding: 12px 12px 0;
       }
 
-      main {
-        padding: 16px;
+      .image-shell {
+        height: calc(100vh - 132px);
+        border-radius: 12px;
+      }
+
+      .controls {
+        padding: 9px 10px 6px;
+      }
+
+      .control-row,
+      .footer-meta {
+        grid-template-columns: 1fr;
+        display: grid;
       }
     }
   </style>
 </head>
 <body>
-  <main>
-    <h1 class="title">Radar Archive Viewer</h1>
-    <p class="subtitle">Choose a region and move the slider to browse archived radar images.</p>
+  <div id="viewer" class="viewer is-loading">
+    <main class="stage">
+      <section class="image-shell">
+        <div id="loadingScreen" class="loading-screen" aria-live="polite">
+          <div class="loading-card">
+            <div class="loading-spinner" aria-hidden="true"></div>
+            <p id="loadingTitle" class="loading-title">Loading radar archive</p>
+            <p id="loadingCopy" class="loading-copy">Preparing saved PNGs for the selected region.</p>
+            <div class="loading-progress">
+              <div class="loading-bar" aria-hidden="true">
+                <div id="loadingBarFill" class="loading-bar-fill"></div>
+              </div>
+              <div class="loading-meta">
+                <span id="loadingCount">0 / 0</span>
+                <span id="loadingPercent">0%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <img id="frame-image" alt="Radar frame" class="is-hidden">
+        <div id="empty-state" class="empty-state">No archived PNGs found yet.</div>
+      </section>
+    </main>
 
-    <section class="panel controls">
-      <div class="field">
-        <label for="region-select">Region</label>
-        <select id="region-select"></select>
-      </div>
-      <div class="field">
-        <label for="frame-slider">Time</label>
-        <input id="frame-slider" type="range" min="0" max="0" value="0" step="1">
-        <div class="meta">
-          <span id="frame-position">0 / 0</span>
-          <span id="frame-time">No frame selected</span>
+    <section class="controls">
+      <div class="control-row">
+        <div class="field">
+          <label for="region-select">Region</label>
+          <select id="region-select"></select>
+        </div>
+        <div class="field">
+          <label for="frame-slider">Time</label>
+          <input id="frame-slider" type="range" min="0" max="0" value="0" step="1">
         </div>
       </div>
+      <div class="footer-meta">
+        <div><strong id="frame-position">0 / 0</strong></div>
+        <div id="frame-time">No frame selected</div>
+        <div>Use the slider or arrow keys to move through time.</div>
+      </div>
     </section>
-
-    <section class="panel viewer">
-      <img id="frame-image" alt="Radar frame" hidden>
-      <div id="empty-state" class="empty">No archived PNGs found yet.</div>
-    </section>
-  </main>
+  </div>
 
   <script>
+    const viewer = document.getElementById('viewer');
     const regionSelect = document.getElementById('region-select');
     const frameSlider = document.getElementById('frame-slider');
     const framePosition = document.getElementById('frame-position');
     const frameTime = document.getElementById('frame-time');
     const frameImage = document.getElementById('frame-image');
     const emptyState = document.getElementById('empty-state');
+    const loadingScreen = document.getElementById('loadingScreen');
+    const loadingTitle = document.getElementById('loadingTitle');
+    const loadingCopy = document.getElementById('loadingCopy');
+    const loadingBarFill = document.getElementById('loadingBarFill');
+    const loadingCount = document.getElementById('loadingCount');
+    const loadingPercent = document.getElementById('loadingPercent');
 
     let currentFrames = [];
+    let currentFrameIndex = 0;
+
+    function setLoadingProgress(loadedCount, totalCount) {
+      const safeTotal = Math.max(totalCount, 1);
+      const percent = totalCount ? Math.round((loadedCount / safeTotal) * 100) : 0;
+      loadingBarFill.style.width = `${percent}%`;
+      loadingCount.textContent = `${loadedCount} / ${totalCount}`;
+      loadingPercent.textContent = `${percent}%`;
+    }
+
+    function showLoading(title, copy, loadedCount = 0, totalCount = currentFrames.length) {
+      viewer.classList.add('is-loading');
+      loadingTitle.textContent = title;
+      loadingCopy.textContent = copy;
+      setLoadingProgress(loadedCount, totalCount);
+      loadingScreen.classList.remove('is-hidden');
+    }
+
+    function hideLoading() {
+      viewer.classList.remove('is-loading');
+      loadingScreen.classList.add('is-hidden');
+    }
+
+    function renderEmpty(message) {
+      currentFrames = [];
+      currentFrameIndex = 0;
+      frameImage.classList.add('is-hidden');
+      emptyState.classList.remove('is-hidden');
+      emptyState.textContent = message;
+      framePosition.textContent = '0 / 0';
+      frameTime.textContent = 'No frame selected';
+      frameSlider.min = '0';
+      frameSlider.max = '0';
+      frameSlider.value = '0';
+      frameSlider.disabled = true;
+      hideLoading();
+    }
+
+    function renderFrame(index) {
+      const frame = currentFrames[index];
+      if (!frame) {
+        renderEmpty('No archived PNGs found for this region.');
+        return;
+      }
+
+      currentFrameIndex = index;
+      frameImage.src = `${frame.url}?t=${encodeURIComponent(frame.timestamp)}`;
+      frameImage.classList.remove('is-hidden');
+      emptyState.classList.add('is-hidden');
+      framePosition.textContent = `${index + 1} / ${currentFrames.length}`;
+      frameTime.textContent = frame.displayTime;
+      frameSlider.value = String(index);
+      frameSlider.disabled = currentFrames.length === 0;
+    }
 
     async function loadRegions() {
-      const response = await fetch('/api/regions');
+      showLoading('Loading regions', 'Checking the archive for saved radar frames.', 0, 0);
+      const response = await fetch('/api/regions', { cache: 'no-store' });
       const payload = await response.json();
       regionSelect.innerHTML = '';
 
@@ -181,7 +412,9 @@
     }
 
     async function loadFrames(regionKey) {
-      const response = await fetch(`/api/frames/${regionKey}`);
+      showLoading('Loading region archive', 'Preparing saved radar PNGs for the selected region.', 0, 0);
+
+      const response = await fetch(`/api/frames/${regionKey}`, { cache: 'no-store' });
       if (!response.ok) {
         renderEmpty('Unable to load frames for this region.');
         return;
@@ -198,33 +431,10 @@
       frameSlider.min = '0';
       frameSlider.max = String(currentFrames.length - 1);
       frameSlider.value = String(currentFrames.length - 1);
+      frameSlider.disabled = false;
+      setLoadingProgress(currentFrames.length, currentFrames.length);
       renderFrame(currentFrames.length - 1);
-    }
-
-    function renderFrame(index) {
-      const frame = currentFrames[index];
-      if (!frame) {
-        renderEmpty('No archived PNGs found for this region.');
-        return;
-      }
-
-      frameImage.src = `${frame.url}?t=${encodeURIComponent(frame.timestamp)}`;
-      frameImage.hidden = false;
-      emptyState.hidden = true;
-      framePosition.textContent = `${index + 1} / ${currentFrames.length}`;
-      frameTime.textContent = frame.displayTime;
-    }
-
-    function renderEmpty(message) {
-      currentFrames = [];
-      frameImage.hidden = true;
-      emptyState.hidden = false;
-      emptyState.textContent = message;
-      framePosition.textContent = '0 / 0';
-      frameTime.textContent = 'No frame selected';
-      frameSlider.min = '0';
-      frameSlider.max = '0';
-      frameSlider.value = '0';
+      hideLoading();
     }
 
     regionSelect.addEventListener('change', async (event) => {
@@ -233,6 +443,20 @@
 
     frameSlider.addEventListener('input', (event) => {
       renderFrame(Number(event.target.value));
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (!currentFrames.length) {
+        return;
+      }
+
+      if (event.key === 'ArrowLeft') {
+        renderFrame(Math.max(currentFrameIndex - 1, 0));
+      }
+
+      if (event.key === 'ArrowRight') {
+        renderFrame(Math.min(currentFrameIndex + 1, currentFrames.length - 1));
+      }
     });
 
     loadRegions().catch(() => {
