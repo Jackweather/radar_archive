@@ -312,7 +312,7 @@ def plot_radar(
     valid_time: pd.Timestamp,
     output_path: Path,
     show: bool,
-) -> None:
+) -> Path:
     figure = plt.figure(figsize=(10, 10))
     projection: ccrs.CRS
     if region_key == "conus":
@@ -384,6 +384,7 @@ def plot_radar(
 
     figure.savefig(archive_output_path, dpi=OUTPUT_DPI, bbox_inches="tight")
     shutil.copy2(archive_output_path, output_path)
+    print(f"Created PNG for {region_key}: {archive_output_path}")
 
     if show:
         plt.show()
@@ -392,6 +393,7 @@ def plot_radar(
 
     plt.close(figure)
     gc.collect()
+    return archive_output_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -427,6 +429,7 @@ def main() -> None:
     lon_1d, lat_1d, values, valid_time = load_radar_grid(args.radar_url)
 
     for region_key, region_config in REGION_CONFIGS.items():
+        print(f"Generating PNG for {region_key}...")
         extent = region_config["extent"]
         lon_grid, lat_grid, reflectivity = subset_radar_grid(lon_1d, lat_1d, values, extent)
         plot_radar(
@@ -441,6 +444,8 @@ def main() -> None:
             output_path=build_output_path(args.output, region_key),
             show=args.show,
         )
+        del lon_grid, lat_grid, reflectivity
+        gc.collect()
 
     prune_archived_pngs(ARCHIVE_ROOT, RETENTION_DAYS)
 
