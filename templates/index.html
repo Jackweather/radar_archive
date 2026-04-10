@@ -336,6 +336,31 @@
 
     let currentFrames = [];
     let currentFrameIndex = 0;
+    let selectedRegionKey = '';
+    let followLatestFrame = true;
+    let refreshTimerId = 0;
+
+    function updateRegionOptions(regions, preserveSelection = true) {
+      const previousSelection = preserveSelection ? selectedRegionKey || regionSelect.value : '';
+      regionSelect.innerHTML = '';
+
+      for (const region of regions) {
+        const option = document.createElement('option');
+        option.value = region.key;
+        option.textContent = `${region.label} (${region.frameCount})`;
+        regionSelect.appendChild(option);
+      }
+
+      if (!regions.length) {
+        selectedRegionKey = '';
+        return '';
+      }
+
+      const matchingRegion = regions.find((region) => region.key === previousSelection);
+      selectedRegionKey = matchingRegion ? matchingRegion.key : regions[0].key;
+      regionSelect.value = selectedRegionKey;
+      return selectedRegionKey;
+    }
 
     function setLoadingProgress(loadedCount, totalCount) {
       const safeTotal = Math.max(totalCount, 1);
@@ -388,30 +413,24 @@
       frameTime.textContent = frame.displayTime;
       frameSlider.value = String(index);
       frameSlider.disabled = currentFrames.length === 0;
+      followLatestFrame = index === currentFrames.length - 1;
     }
 
     async function loadRegions() {
       showLoading('Loading regions', 'Checking the archive for saved radar frames.', 0, 0);
       const response = await fetch('/api/regions', { cache: 'no-store' });
       const payload = await response.json();
-      regionSelect.innerHTML = '';
-
-      for (const region of payload.regions) {
-        const option = document.createElement('option');
-        option.value = region.key;
-        option.textContent = `${region.label} (${region.frameCount})`;
-        regionSelect.appendChild(option);
-      }
 
       if (payload.regions.length === 0) {
         renderEmpty('No archived PNGs found yet.');
         return;
       }
 
-      await loadFrames(regionSelect.value || payload.regions[0].key);
+      const initialRegionKey = updateRegionOptions(payload.regions, false);
+      await loadFrames(initialRegionKey);
     }
 
-    async function loadFrames(regionKey) {
+    async function loadFrames(regionKey, preservePosition = false) {
       showLoading('Loading region archive', 'Preparing saved radar PNGs for the selected region.', 0, 0);
 
       const response = await fetch(`/api/frames/${regionKey}`, { cache: 'no-store' });
@@ -421,6 +440,8 @@
       }
 
       const payload = await response.json();
+      selectedRegionKey = regionKey;
+      const previousFilename = preservePosition ? currentFrames[currentFrameIndex]?.filename : null;
       currentFrames = payload.frames;
 
       if (currentFrames.length === 0) {
@@ -430,14 +451,86 @@
 
       frameSlider.min = '0';
       frameSlider.max = String(currentFrames.length - 1);
-      frameSlider.value = String(currentFrames.length - 1);
       frameSlider.disabled = false;
       setLoadingProgress(currentFrames.length, currentFrames.length);
-      renderFrame(currentFrames.length - 1);
+
+      let nextIndex = currentFrames.length - 1;
+      if (preservePosition && previousFilename && !followLatestFrame) {
+        const matchingIndex = currentFrames.findIndex((frame) => frame.filename === previousFilename);
+        if (matchingIndex >= 0) {
+          nextIndex = matchingIndex;
+        }
+      }
+
+      renderFrame(nextIndex);
       hideLoading();
     }
 
+    async function refreshArchiveData() {
+      try {
+        const regionResponse = await fetch('/api/regions', { cache: 'no-store' });
+        if (!regionResponse.ok) {
+          return;
+        }
+
+        const regionPayload = await regionResponse.json();
+        const currentRegionKey = updateRegionOptions(regionPayload.regions, true);
+        if (!currentRegionKey) {
+          renderEmpty('No archived PNGs found yet.');
+          return;
+        }
+
+        const framesResponse = await fetch(`/api/frames/${currentRegionKey}`, { cache: 'no-store' });
+        if (!framesResponse.ok) {
+          return;
+        }
+
+        const framesPayload = await framesResponse.json();
+        const nextFrames = framesPayload.frames;
+        const previousLatestFilename = currentFrames[currentFrames.length - 1]?.filename;
+        const nextLatestFilename = nextFrames[nextFrames.length - 1]?.filename;
+        const frameCountChanged = nextFrames.length !== currentFrames.length;
+        const latestFrameChanged = previousLatestFilename !== nextLatestFilename;
+
+        if (!frameCountChanged && !latestFrameChanged) {
+          return;
+        }
+
+        const previousFilename = currentFrames[currentFrameIndex]?.filename;
+        currentFrames = nextFrames;
+
+        if (!currentFrames.length) {
+          renderEmpty('No archived PNGs found for this region.');
+          return;
+        }
+
+        frameSlider.min = '0';
+        frameSlider.max = String(currentFrames.length - 1);
+        frameSlider.disabled = false;
+
+        let nextIndex = currentFrames.length - 1;
+        if (!followLatestFrame && previousFilename) {
+          const matchingIndex = currentFrames.findIndex((frame) => frame.filename === previousFilename);
+          if (matchingIndex >= 0) {
+            nextIndex = matchingIndex;
+          }
+        }
+
+        renderFrame(nextIndex);
+      } catch {
+        return;
+      }
+    }
+
+    function startAutoRefresh() {
+      if (refreshTimerId) {
+        window.clearInterval(refreshTimerId);
+      }
+      refreshTimerId = window.setInterval(refreshArchiveData, 60000);
+    }
+
     regionSelect.addEventListener('change', async (event) => {
+      followLatestFrame = true;
       await loadFrames(event.target.value);
     });
 
@@ -462,6 +555,8 @@
     loadRegions().catch(() => {
       renderEmpty('Unable to load the archive viewer.');
     });
+
+    startAutoRefresh();
   </script>
 </body>
 </html>
