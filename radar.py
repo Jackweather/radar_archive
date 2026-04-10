@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import gzip
+import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -28,7 +30,7 @@ ARCHIVE_ROOT = BASE_DIR / "mrms_radar_archive"
 CONUS_EXTENT = (-124.0, -67.5, 25.0, 49.5)
 MIN_DBZ = 5.0
 MAX_DBZ = 70.0
-OUTPUT_DPI = 900
+OUTPUT_DPI = 300
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 REGION_PADDING_FRACTION = 0.05
 RETENTION_DAYS = 10
@@ -256,14 +258,14 @@ def load_radar_grid(url: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.Ti
 
         grib_file = pygrib.open(str(grib_path))
         message = grib_file.message(1)
-        values = np.asarray(message.values, dtype=float)
+        values = np.asarray(message.values, dtype=np.float32)
         valid_time = pd.Timestamp(message.validDate, tz="UTC")
         latitudes, longitudes = message.latlons()
         grib_file.close()
 
-    lon_1d = longitudes[0].copy()
+    lon_1d = longitudes[0].astype(np.float32, copy=True)
     lon_1d = np.where(lon_1d > 180.0, lon_1d - 360.0, lon_1d)
-    lat_1d = latitudes[:, 0].copy()
+    lat_1d = latitudes[:, 0].astype(np.float32, copy=True)
 
     return lon_1d, lat_1d, values, valid_time
 
@@ -380,13 +382,16 @@ def plot_radar(
     archive_output_path = build_archive_output_path(region_key, valid_time)
     archive_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    figure.savefig(output_path, dpi=OUTPUT_DPI, bbox_inches="tight")
     figure.savefig(archive_output_path, dpi=OUTPUT_DPI, bbox_inches="tight")
+    shutil.copy2(archive_output_path, output_path)
 
     if show:
         plt.show()
     else:
         plt.close(figure)
+
+    plt.close(figure)
+    gc.collect()
 
 
 def parse_args() -> argparse.Namespace:
