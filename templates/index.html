@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Radar Archive Viewer</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --panel: rgba(255, 255, 255, 0.9);
+      --text: #162330;
+      --muted: #5f7182;
+      --accent: #0b6bcb;
+      --border: rgba(22, 35, 48, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(11, 107, 203, 0.18), transparent 30%),
+        radial-gradient(circle at top right, rgba(13, 148, 136, 0.16), transparent 26%),
+        linear-gradient(180deg, #f8fbfe 0%, var(--bg) 100%);
+      min-height: 100vh;
+    }
+
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 18px 50px rgba(27, 39, 51, 0.08);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      gap: 20px;
+      padding: 20px;
+      margin-bottom: 20px;
+      align-items: end;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    label {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    select,
+    input[type="range"] {
+      width: 100%;
+    }
+
+    select {
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: white;
+      color: var(--text);
+    }
+
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .viewer {
+      padding: 20px;
+    }
+
+    .viewer img {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: white;
+    }
+
+    .empty {
+      padding: 60px 24px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .title {
+      margin: 0 0 6px;
+      font-size: 1.5rem;
+    }
+
+    .subtitle {
+      margin: 0 0 20px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 800px) {
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      main {
+        padding: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 class="title">Radar Archive Viewer</h1>
+    <p class="subtitle">Choose a region and move the slider to browse archived radar images.</p>
+
+    <section class="panel controls">
+      <div class="field">
+        <label for="region-select">Region</label>
+        <select id="region-select"></select>
+      </div>
+      <div class="field">
+        <label for="frame-slider">Time</label>
+        <input id="frame-slider" type="range" min="0" max="0" value="0" step="1">
+        <div class="meta">
+          <span id="frame-position">0 / 0</span>
+          <span id="frame-time">No frame selected</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel viewer">
+      <img id="frame-image" alt="Radar frame" hidden>
+      <div id="empty-state" class="empty">No archived PNGs found yet.</div>
+    </section>
+  </main>
+
+  <script>
+    const regionSelect = document.getElementById('region-select');
+    const frameSlider = document.getElementById('frame-slider');
+    const framePosition = document.getElementById('frame-position');
+    const frameTime = document.getElementById('frame-time');
+    const frameImage = document.getElementById('frame-image');
+    const emptyState = document.getElementById('empty-state');
+
+    let currentFrames = [];
+
+    async function loadRegions() {
+      const response = await fetch('/api/regions');
+      const payload = await response.json();
+      regionSelect.innerHTML = '';
+
+      for (const region of payload.regions) {
+        const option = document.createElement('option');
+        option.value = region.key;
+        option.textContent = `${region.label} (${region.frameCount})`;
+        regionSelect.appendChild(option);
+      }
+
+      if (payload.regions.length === 0) {
+        renderEmpty('No archived PNGs found yet.');
+        return;
+      }
+
+      await loadFrames(regionSelect.value || payload.regions[0].key);
+    }
+
+    async function loadFrames(regionKey) {
+      const response = await fetch(`/api/frames/${regionKey}`);
+      if (!response.ok) {
+        renderEmpty('Unable to load frames for this region.');
+        return;
+      }
+
+      const payload = await response.json();
+      currentFrames = payload.frames;
+
+      if (currentFrames.length === 0) {
+        renderEmpty('No archived PNGs found for this region.');
+        return;
+      }
+
+      frameSlider.min = '0';
+      frameSlider.max = String(currentFrames.length - 1);
+      frameSlider.value = String(currentFrames.length - 1);
+      renderFrame(currentFrames.length - 1);
+    }
+
+    function renderFrame(index) {
+      const frame = currentFrames[index];
+      if (!frame) {
+        renderEmpty('No archived PNGs found for this region.');
+        return;
+      }
+
+      frameImage.src = `${frame.url}?t=${encodeURIComponent(frame.timestamp)}`;
+      frameImage.hidden = false;
+      emptyState.hidden = true;
+      framePosition.textContent = `${index + 1} / ${currentFrames.length}`;
+      frameTime.textContent = frame.displayTime;
+    }
+
+    function renderEmpty(message) {
+      currentFrames = [];
+      frameImage.hidden = true;
+      emptyState.hidden = false;
+      emptyState.textContent = message;
+      framePosition.textContent = '0 / 0';
+      frameTime.textContent = 'No frame selected';
+      frameSlider.min = '0';
+      frameSlider.max = '0';
+      frameSlider.value = '0';
+    }
+
+    regionSelect.addEventListener('change', async (event) => {
+      await loadFrames(event.target.value);
+    });
+
+    frameSlider.addEventListener('input', (event) => {
+      renderFrame(Number(event.target.value));
+    });
+
+    loadRegions().catch(() => {
+      renderEmpty('Unable to load the archive viewer.');
+    });
+  </script>
+</body>
+</html>
