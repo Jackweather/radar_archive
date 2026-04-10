@@ -137,18 +137,11 @@ def index() -> str:
 @app.route("/run-task1")
 def run_task1():
     scripts = [
-        ("/opt/render/project/src/select_east_run.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/mslp_prate_csnow_EAST.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/tmp2m_EAST.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/vis_EAST.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/weasd_EAST.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/apcp_EAST.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/rh_EAST.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/cloudcover_EAST.py", "/opt/render/project/src"),
-        ("/opt/render/project/src/maxwind_EAST.py", "/opt/render/project/src"),
+        ("/opt/render/project/src/radar.py", "/opt/render/project/src"),
+        
     ]
     threading.Thread(
-        target=lambda: run_scripts(scripts, 3, parallel=True, max_parallel=3),
+        target=lambda: run_scripts(scripts, 1, parallel=True, max_parallel=1),
         daemon=True,
     ).start()
     return "Task started in background! Check logs folder for output.", 200
