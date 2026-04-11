@@ -27,6 +27,7 @@ DEFAULT_RADAR_URL = "https://mrms.ncep.noaa.gov/2D/ReflectivityAtLowestAltitude/
 DEFAULT_OUTPUT = Path("mrms_conus_radar.png")
 BASE_DIR = Path("/var/data")
 ARCHIVE_ROOT = BASE_DIR / "mrms_radar_archive"
+GRIB_ARCHIVE_ROOT = BASE_DIR / "mrms_grib_archive"
 CONUS_EXTENT = (-124.0, -67.5, 25.0, 49.5)
 MIN_DBZ = 5.0
 MAX_DBZ = 70.0
@@ -232,15 +233,22 @@ def build_archive_output_path(region_key: str, valid_time: pd.Timestamp) -> Path
     return region_dir / f"mrms_{region_key}_{timestamp}.png"
 
 
-def prune_archived_pngs(archive_root: Path, retention_days: int) -> None:
+def build_grib_archive_path(valid_time: pd.Timestamp) -> Path:
+    eastern_time = valid_time.tz_convert(EASTERN_TIMEZONE)
+    date_dir = GRIB_ARCHIVE_ROOT / eastern_time.strftime("%y-%m-%d")
+    timestamp = valid_time.tz_convert(timezone.utc).strftime("%Y%m%d_%H%M")
+    return date_dir / f"mrms_{timestamp}.grib2"
+
+
+def prune_archived_files(archive_root: Path, pattern: str, retention_days: int) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     if not archive_root.exists():
         return
 
-    for png_path in archive_root.rglob("*.png"):
-        modified_time = datetime.fromtimestamp(png_path.stat().st_mtime, tz=timezone.utc)
+    for file_path in archive_root.rglob(pattern):
+        modified_time = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
         if modified_time < cutoff:
-            png_path.unlink(missing_ok=True)
+            file_path.unlink(missing_ok=True)
 
 
 def load_radar_grid(url: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.Timestamp]:
@@ -262,6 +270,11 @@ def load_radar_grid(url: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.Ti
         valid_time = pd.Timestamp(message.validDate, tz="UTC")
         latitudes, longitudes = message.latlons()
         grib_file.close()
+
+        grib_archive_path = build_grib_archive_path(valid_time)
+        grib_archive_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(grib_path, grib_archive_path)
+        print(f"Archived GRIB: {grib_archive_path}")
 
     lon_1d = longitudes[0].astype(np.float32, copy=True)
     lon_1d = np.where(lon_1d > 180.0, lon_1d - 360.0, lon_1d)
@@ -447,7 +460,8 @@ def main() -> None:
         del lon_grid, lat_grid, reflectivity
         gc.collect()
 
-    prune_archived_pngs(ARCHIVE_ROOT, RETENTION_DAYS)
+    prune_archived_files(ARCHIVE_ROOT, "*.png", RETENTION_DAYS)
+    prune_archived_files(GRIB_ARCHIVE_ROOT, "*.grib2", RETENTION_DAYS)
 
 
 if __name__ == "__main__":
