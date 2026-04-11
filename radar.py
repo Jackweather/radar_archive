@@ -19,11 +19,14 @@ import pandas as pd
 import pygrib
 import requests
 from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.lines import Line2D
+from shapely.geometry import box
 
 
 DEFAULT_COUNTY_URL = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
 DEFAULT_STATES_URL = "https://eric.clst.org/assets/wiki/uploads/Stuff/gz_2010_us_040_00_500k.json"
 DEFAULT_RADAR_URL = "https://mrms.ncep.noaa.gov/2D/ReflectivityAtLowestAltitude/MRMS_ReflectivityAtLowestAltitude.latest.grib2.gz"
+DEFAULT_NWS_ALERTS_URL = "https://api.weather.gov/alerts/active"
 DEFAULT_OUTPUT = Path("mrms_conus_radar.png")
 BASE_DIR = Path("/var/data")
 ARCHIVE_ROOT = BASE_DIR / "mrms_radar_archive"
@@ -35,6 +38,24 @@ OUTPUT_DPI = 300
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 REGION_PADDING_FRACTION = 0.05
 RETENTION_DAYS = 10
+NWS_REQUEST_HEADERS = {
+    "Accept": "application/geo+json",
+    "User-Agent": "RadarArchiverWebsite/1.0 (contact: local-use)",
+}
+WARNING_EVENT_STYLES: dict[str, dict[str, object]] = {
+    "Tornado Warning": {
+        "edgecolor": "#ff0000",
+        "facecolor": "#ff0000",
+        "linewidth": 1.4,
+        "label": "Tornado Warning",
+    },
+    "Severe Thunderstorm Warning": {
+        "edgecolor": "#ffa500",
+        "facecolor": "#ffa500",
+        "linewidth": 1.4,
+        "label": "Severe Tstm Warning",
+    },
+}
 
 NORTHEAST_STATE_NAMES = [
     "Maine", "New Hampshire", "Vermont", "Massachusetts", "Rhode Island", "Connecticut",
@@ -100,6 +121,64 @@ def load_geojson(url: str) -> gpd.GeoDataFrame:
         raise ValueError(f"The GeoJSON at {url} did not contain any features.")
 
     return geo_dataframe
+
+
+def fetch_active_warning_polygons(alerts_url: str = DEFAULT_NWS_ALERTS_URL) -> gpd.GeoDataFrame:
+    warning_features: list[dict[str, object]] = []
+
+    for event_name in WARNING_EVENT_STYLES:
+        try:
+            response = requests.get(
+                alerts_url,
+                params={"event": event_name},
+                headers=NWS_REQUEST_HEADERS,
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            print(f"Unable to fetch NWS {event_name} polygons: {exc}")
+            continue
+
+        for feature in payload.get("features", []):
+            geometry = feature.get("geometry")
+            if geometry is None or geometry.get("type") not in {"Polygon", "MultiPolygon"}:
+                continue
+            warning_features.append(feature)
+
+    if not warning_features:
+        return gpd.GeoDataFrame({"event": pd.Series(dtype="object")}, geometry=[], crs="EPSG:4326")
+
+    warnings_gdf = gpd.GeoDataFrame.from_features(warning_features, crs="EPSG:4326")
+    if warnings_gdf.empty:
+        return gpd.GeoDataFrame({"event": pd.Series(dtype="object")}, geometry=[], crs="EPSG:4326")
+
+    warnings_gdf = warnings_gdf.to_crs("EPSG:4326")
+    warnings_gdf = warnings_gdf[warnings_gdf.geometry.notna()].copy()
+    if "event" not in warnings_gdf.columns:
+        warnings_gdf["event"] = ""
+    if "id" in warnings_gdf.columns:
+        warnings_gdf = warnings_gdf.drop_duplicates(subset=["id"]).reset_index(drop=True)
+    else:
+        warnings_gdf = warnings_gdf.reset_index(drop=True)
+
+    tornado_count = int((warnings_gdf["event"] == "Tornado Warning").sum())
+    severe_count = int((warnings_gdf["event"] == "Severe Thunderstorm Warning").sum())
+    print(f"Loaded NWS warning polygons: tornado={tornado_count}, severe_thunderstorm={severe_count}")
+    return warnings_gdf
+
+
+def warnings_for_extent(
+    warnings_gdf: gpd.GeoDataFrame,
+    subset_extent: tuple[float, float, float, float],
+) -> gpd.GeoDataFrame:
+    if warnings_gdf.empty:
+        return warnings_gdf
+
+    min_lon, max_lon, min_lat, max_lat = subset_extent
+    extent_polygon = box(min_lon, min_lat, max_lon, max_lat)
+    extent_warnings = warnings_gdf[warnings_gdf.intersects(extent_polygon)].copy()
+    return extent_warnings.reset_index(drop=True)
 
 
 @lru_cache(maxsize=1)
@@ -317,6 +396,7 @@ def build_title(valid_time: pd.Timestamp, region_key: str) -> str:
 def plot_radar(
     counties: gpd.GeoDataFrame,
     states: gpd.GeoDataFrame,
+    warnings_gdf: gpd.GeoDataFrame,
     region_key: str,
     subset_extent: tuple[float, float, float, float],
     lon_grid: np.ndarray,
@@ -363,6 +443,45 @@ def plot_radar(
         )
     else:
         axis.add_feature(cfeature.STATES.with_scale("50m"), linewidth=0.6, edgecolor="#4f4f4f", zorder=4)
+
+    region_warnings = warnings_for_extent(warnings_gdf, subset_extent)
+    if not region_warnings.empty:
+        legend_handles: list[Line2D] = []
+        for event_name, style in WARNING_EVENT_STYLES.items():
+            event_warnings = region_warnings[region_warnings["event"] == event_name]
+            if event_warnings.empty:
+                continue
+
+            axis.add_geometries(
+                event_warnings.geometry,
+                crs=ccrs.PlateCarree(),
+                facecolor=style["facecolor"],
+                edgecolor=style["edgecolor"],
+                linewidth=style["linewidth"],
+                alpha=0.12,
+                zorder=5,
+            )
+            axis.add_geometries(
+                event_warnings.geometry,
+                crs=ccrs.PlateCarree(),
+                facecolor="none",
+                edgecolor=style["edgecolor"],
+                linewidth=style["linewidth"],
+                alpha=0.95,
+                zorder=6,
+            )
+            legend_handles.append(
+                Line2D([0], [0], color=style["edgecolor"], linewidth=style["linewidth"], label=style["label"])
+            )
+
+        if legend_handles:
+            axis.legend(
+                handles=legend_handles,
+                loc="lower left",
+                fontsize=8,
+                framealpha=0.88,
+                facecolor="white",
+            )
 
     cmap, norm = build_radar_colormap()
 
@@ -440,6 +559,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     lon_1d, lat_1d, values, valid_time = load_radar_grid(args.radar_url)
+    warnings_gdf = fetch_active_warning_polygons()
 
     for region_key, region_config in REGION_CONFIGS.items():
         print(f"Generating PNG for {region_key}...")
@@ -448,6 +568,7 @@ def main() -> None:
         plot_radar(
             counties=region_config["counties_gdf"],
             states=region_config["states_gdf"],
+            warnings_gdf=warnings_gdf,
             region_key=region_key,
             subset_extent=extent,
             lon_grid=lon_grid,
