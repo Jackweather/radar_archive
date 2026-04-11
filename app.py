@@ -15,6 +15,7 @@ from flask import Flask, abort, jsonify, render_template, send_from_directory
 
 BASE_DIR = Path("/var/data")
 ARCHIVE_ROOT = BASE_DIR / "mrms_radar_archive"
+GRIB_ARCHIVE_ROOT = BASE_DIR / "mrms_grib_archive"
 LOG_ROOT = BASE_DIR / "logs"
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 TIMESTAMP_PATTERN = re.compile(r"(\d{8}_\d{4})$")
@@ -130,43 +131,28 @@ def list_regions() -> list[dict[str, str | int]]:
     return regions
 
 
-def list_archive_inventory() -> list[dict[str, object]]:
-    if not ARCHIVE_ROOT.exists():
+def list_grib_inventory() -> list[dict[str, object]]:
+    if not GRIB_ARCHIVE_ROOT.exists():
         return []
 
     inventory: list[dict[str, object]] = []
-    for region_dir in sorted(path for path in ARCHIVE_ROOT.iterdir() if path.is_dir()):
-        grouped_frames: dict[str, list[dict[str, str]]] = defaultdict(list)
-
-        for png_path in sorted(region_dir.glob("*.png"), reverse=True):
-            frame_time = parse_frame_time(png_path)
-            if frame_time is None:
-                continue
-
-            eastern_time = frame_time.astimezone(EASTERN_TIMEZONE)
-            date_key = eastern_time.strftime("%y-%m-%d")
-            grouped_frames[date_key].append(
+    date_directories = sorted((path for path in GRIB_ARCHIVE_ROOT.iterdir() if path.is_dir()), reverse=True)
+    for date_dir in date_directories:
+        files: list[dict[str, str]] = []
+        for grib_path in sorted(date_dir.glob("*.grib2"), reverse=True):
+            files.append(
                 {
-                    "filename": png_path.name,
-                    "displayTime": eastern_time.strftime("%y-%m-%d %I:%M %p %Z"),
-                    "url": f"/images/{region_dir.name}/{png_path.name}",
+                    "filename": grib_path.name,
+                    "displayTime": date_dir.name,
+                    "url": f"/grib-files/{date_dir.name}/{grib_path.name}",
                 }
             )
 
-        dates = [
-            {
-                "date": date_key,
-                "count": len(files),
-                "files": files,
-            }
-            for date_key, files in sorted(grouped_frames.items(), reverse=True)
-        ]
-
         inventory.append(
             {
-                "region": region_dir.name,
-                "label": region_label(region_dir.name),
-                "dates": dates,
+                "date": date_dir.name,
+                "count": len(files),
+                "files": files,
             }
         )
 
@@ -180,7 +166,7 @@ def index() -> str:
 
 @app.route("/vault-archive")
 def vault_archive() -> str:
-    return render_template("archive_vault.html", inventory=list_archive_inventory())
+    return render_template("archive_vault.html", inventory=list_grib_inventory())
 
 
 @app.route("/run-task1")
@@ -215,6 +201,14 @@ def serve_image(region_key: str, filename: str):
     if not region_dir.exists():
         abort(404, description="Unknown region")
     return send_from_directory(region_dir, filename)
+
+
+@app.route("/grib-files/<date_key>/<path:filename>")
+def serve_grib_file(date_key: str, filename: str):
+    date_dir = GRIB_ARCHIVE_ROOT / date_key
+    if not date_dir.exists():
+        abort(404, description="Unknown GRIB date")
+    return send_from_directory(date_dir, filename, as_attachment=True)
 
 
 if __name__ == "__main__":
