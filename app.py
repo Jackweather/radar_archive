@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+from collections import defaultdict
 import re
 import subprocess
 import sys
@@ -129,9 +130,57 @@ def list_regions() -> list[dict[str, str | int]]:
     return regions
 
 
+def list_archive_inventory() -> list[dict[str, object]]:
+    if not ARCHIVE_ROOT.exists():
+        return []
+
+    inventory: list[dict[str, object]] = []
+    for region_dir in sorted(path for path in ARCHIVE_ROOT.iterdir() if path.is_dir()):
+        grouped_frames: dict[str, list[dict[str, str]]] = defaultdict(list)
+
+        for png_path in sorted(region_dir.glob("*.png"), reverse=True):
+            frame_time = parse_frame_time(png_path)
+            if frame_time is None:
+                continue
+
+            eastern_time = frame_time.astimezone(EASTERN_TIMEZONE)
+            date_key = eastern_time.strftime("%y-%m-%d")
+            grouped_frames[date_key].append(
+                {
+                    "filename": png_path.name,
+                    "displayTime": eastern_time.strftime("%y-%m-%d %I:%M %p %Z"),
+                    "url": f"/images/{region_dir.name}/{png_path.name}",
+                }
+            )
+
+        dates = [
+            {
+                "date": date_key,
+                "count": len(files),
+                "files": files,
+            }
+            for date_key, files in sorted(grouped_frames.items(), reverse=True)
+        ]
+
+        inventory.append(
+            {
+                "region": region_dir.name,
+                "label": region_label(region_dir.name),
+                "dates": dates,
+            }
+        )
+
+    return inventory
+
+
 @app.route("/")
 def index() -> str:
     return render_template("index.html")
+
+
+@app.route("/vault-archive")
+def vault_archive() -> str:
+    return render_template("archive_vault.html", inventory=list_archive_inventory())
 
 
 @app.route("/run-task1")
