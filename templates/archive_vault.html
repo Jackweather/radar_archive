@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Archive Vault</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111c;
+      --panel: rgba(11, 18, 31, 0.94);
+      --panel-soft: rgba(16, 27, 44, 0.88);
+      --text: #edf4ff;
+      --muted: #97abc4;
+      --accent: #66d9ef;
+      --border: rgba(151, 171, 196, 0.18);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(102, 217, 239, 0.14), transparent 28%),
+        linear-gradient(180deg, #0f1e35 0%, var(--bg) 40%, #03070f 100%);
+    }
+
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 28px 20px 40px;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      margin-bottom: 24px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 1.8rem;
+    }
+
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .back-link {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.95rem;
+      white-space: nowrap;
+    }
+
+    .region-grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .region-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+    }
+
+    .region-name {
+      margin: 0 0 14px;
+      font-size: 1.2rem;
+    }
+
+    .date-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }
+
+    .date-card {
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    .date-title {
+      margin: 0 0 4px;
+      font-size: 1rem;
+    }
+
+    .date-meta {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    .file-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .file-link {
+      display: block;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(151, 171, 196, 0.12);
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .file-link:hover {
+      border-color: rgba(102, 217, 239, 0.35);
+      background: rgba(102, 217, 239, 0.08);
+    }
+
+    .file-name {
+      display: block;
+      font-size: 0.9rem;
+      word-break: break-all;
+    }
+
+    .file-time {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
+    .empty {
+      padding: 36px 20px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--panel);
+      text-align: center;
+      color: var(--muted);
+    }
+
+    @media (max-width: 720px) {
+      .header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="header">
+      <div>
+        <h1 class="title">Archive Vault</h1>
+        <p class="subtitle">Direct PNG access grouped by region and date in <strong>yy-mm-dd</strong> format.</p>
+      </div>
+      <a class="back-link" href="/">Back to viewer</a>
+    </div>
+
+    {% if inventory %}
+      <div class="region-grid">
+        {% for region in inventory %}
+          <section class="region-card">
+            <h2 class="region-name">{{ region.label }}</h2>
+            {% if region.dates %}
+              <div class="date-grid">
+                {% for day in region.dates %}
+                  <section class="date-card">
+                    <h3 class="date-title">{{ day.date }}</h3>
+                    <p class="date-meta">{{ day.count }} file{% if day.count != 1 %}s{% endif %}</p>
+                    <div class="file-list">
+                      {% for file in day.files %}
+                        <a class="file-link" href="{{ file.url }}" target="_blank" rel="noopener noreferrer">
+                          <span class="file-name">{{ file.filename }}</span>
+                          <span class="file-time">{{ file.displayTime }}</span>
+                        </a>
+                      {% endfor %}
+                    </div>
+                  </section>
+                {% endfor %}
+              </div>
+            {% else %}
+              <p class="date-meta">No archived files found for this region.</p>
+            {% endif %}
+          </section>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">No archived PNGs found yet.</div>
+    {% endif %}
+  </main>
+</body>
+</html>
