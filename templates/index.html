@@ -247,6 +247,27 @@
       font-weight: 600;
     }
 
+    .vault-trigger {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: rgba(102, 217, 239, 0.08);
+      border: 1px solid rgba(102, 217, 239, 0.08);
+      opacity: 0.08;
+      z-index: 30;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+
+    .vault-trigger:hover,
+    .vault-trigger:focus {
+      opacity: 0.45;
+      transform: scale(1.08);
+      outline: none;
+    }
+
     @keyframes spin {
       to {
         transform: rotate(360deg);
@@ -276,6 +297,7 @@
   </style>
 </head>
 <body>
+  <a class="vault-trigger" href="/vault-archive" aria-label="Open archive vault"></a>
   <div id="viewer" class="viewer is-loading">
     <main class="stage">
       <section class="image-shell">
@@ -339,6 +361,15 @@
     let selectedRegionKey = '';
     let followLatestFrame = true;
     let refreshTimerId = 0;
+    let requestedFrameIndex = -1;
+    let activeRegionToken = '';
+
+    const frameCache = new Map();
+    const pendingFrameLoads = new Map();
+    const preloadQueue = [];
+    const PRELOAD_RADIUS = 4;
+    const MAX_CACHED_FRAMES = 36;
+    let isProcessingPreloadQueue = false;
 
     function updateRegionOptions(regions, preserveSelection = true) {
       const previousSelection = preserveSelection ? selectedRegionKey || regionSelect.value : '';
@@ -384,6 +415,7 @@
     }
 
     function renderEmpty(message) {
+      clearFrameState();
       currentFrames = [];
       currentFrameIndex = 0;
       frameImage.classList.add('is-hidden');
@@ -398,15 +430,145 @@
       hideLoading();
     }
 
-    function renderFrame(index) {
+    function clearFrameState() {
+      for (const cachedFrame of frameCache.values()) {
+        URL.revokeObjectURL(cachedFrame.objectUrl);
+      }
+
+      frameCache.clear();
+      pendingFrameLoads.clear();
+      preloadQueue.length = 0;
+      requestedFrameIndex = -1;
+    }
+
+    function getFrameCacheKey(frame) {
+      return `${selectedRegionKey}:${frame.filename}`;
+    }
+
+    function trimFrameCache() {
+      const protectedKeys = new Set();
+
+      for (let offset = -PRELOAD_RADIUS; offset <= PRELOAD_RADIUS; offset += 1) {
+        const frame = currentFrames[currentFrameIndex + offset];
+        if (frame) {
+          protectedKeys.add(getFrameCacheKey(frame));
+        }
+      }
+
+      while (frameCache.size > MAX_CACHED_FRAMES) {
+        const oldestKey = frameCache.keys().next().value;
+        if (!oldestKey) {
+          break;
+        }
+
+        if (protectedKeys.has(oldestKey)) {
+          const cachedFrame = frameCache.get(oldestKey);
+          frameCache.delete(oldestKey);
+          frameCache.set(oldestKey, cachedFrame);
+          continue;
+        }
+
+        const cachedFrame = frameCache.get(oldestKey);
+        if (cachedFrame) {
+          URL.revokeObjectURL(cachedFrame.objectUrl);
+        }
+        frameCache.delete(oldestKey);
+      }
+    }
+
+    async function fetchFrameIntoCache(frame) {
+      const cacheKey = getFrameCacheKey(frame);
+      if (frameCache.has(cacheKey)) {
+        const cachedFrame = frameCache.get(cacheKey);
+        frameCache.delete(cacheKey);
+        frameCache.set(cacheKey, cachedFrame);
+        return cachedFrame;
+      }
+
+      if (pendingFrameLoads.has(cacheKey)) {
+        return pendingFrameLoads.get(cacheKey);
+      }
+
+      const frameUrl = `${frame.url}?t=${encodeURIComponent(frame.timestamp)}`;
+      const frameLoadPromise = fetch(frameUrl, { cache: 'force-cache' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Unable to fetch frame');
+          }
+          return response.blob();
+        })
+        .then(async (blob) => {
+          const objectUrl = URL.createObjectURL(blob);
+          const image = new Image();
+          image.decoding = 'async';
+          image.src = objectUrl;
+          await image.decode();
+          const cachedFrame = { objectUrl, image };
+          frameCache.set(cacheKey, cachedFrame);
+          trimFrameCache();
+          return cachedFrame;
+        })
+        .finally(() => {
+          pendingFrameLoads.delete(cacheKey);
+        });
+
+      pendingFrameLoads.set(cacheKey, frameLoadPromise);
+      return frameLoadPromise;
+    }
+
+    async function processPreloadQueue() {
+      if (isProcessingPreloadQueue) {
+        return;
+      }
+
+      isProcessingPreloadQueue = true;
+      while (preloadQueue.length) {
+        const nextFrame = preloadQueue.shift();
+        if (!nextFrame) {
+          continue;
+        }
+
+        try {
+          await fetchFrameIntoCache(nextFrame);
+        } catch {
+          continue;
+        }
+      }
+      isProcessingPreloadQueue = false;
+    }
+
+    function preloadNearbyFrames(centerIndex) {
+      const queuedKeys = new Set(preloadQueue.map((frame) => getFrameCacheKey(frame)));
+
+      for (let distance = 1; distance <= PRELOAD_RADIUS; distance += 1) {
+        for (const index of [centerIndex + distance, centerIndex - distance]) {
+          const frame = currentFrames[index];
+          if (!frame) {
+            continue;
+          }
+
+          const cacheKey = getFrameCacheKey(frame);
+          if (frameCache.has(cacheKey) || pendingFrameLoads.has(cacheKey) || queuedKeys.has(cacheKey)) {
+            continue;
+          }
+
+          preloadQueue.push(frame);
+          queuedKeys.add(cacheKey);
+        }
+      }
+
+      void processPreloadQueue();
+    }
+
+    async function renderFrame(index) {
       const frame = currentFrames[index];
       if (!frame) {
         renderEmpty('No archived PNGs found for this region.');
         return;
       }
 
+      requestedFrameIndex = index;
       currentFrameIndex = index;
-      frameImage.src = `${frame.url}?t=${encodeURIComponent(frame.timestamp)}`;
       frameImage.classList.remove('is-hidden');
       emptyState.classList.add('is-hidden');
       framePosition.textContent = `${index + 1} / ${currentFrames.length}`;
@@ -414,6 +576,22 @@
       frameSlider.value = String(index);
       frameSlider.disabled = currentFrames.length === 0;
       followLatestFrame = index === currentFrames.length - 1;
+
+      const regionToken = activeRegionToken;
+
+      try {
+        const cachedFrame = await fetchFrameIntoCache(frame);
+        if (requestedFrameIndex !== index || activeRegionToken !== regionToken) {
+          return;
+        }
+
+        frameImage.src = cachedFrame.objectUrl;
+        preloadNearbyFrames(index);
+      } catch {
+        if (requestedFrameIndex === index && activeRegionToken === regionToken) {
+          renderEmpty('Unable to load this radar frame.');
+        }
+      }
     }
 
     async function loadRegions() {
@@ -441,6 +619,8 @@
 
       const payload = await response.json();
       selectedRegionKey = regionKey;
+        activeRegionToken = `${regionKey}:${Date.now()}`;
+        clearFrameState();
       const previousFilename = preservePosition ? currentFrames[currentFrameIndex]?.filename : null;
       currentFrames = payload.frames;
 
@@ -462,7 +642,7 @@
         }
       }
 
-      renderFrame(nextIndex);
+      await renderFrame(nextIndex);
       hideLoading();
     }
 
@@ -473,6 +653,7 @@
           return;
         }
 
+        const previousRegionKey = selectedRegionKey;
         const regionPayload = await regionResponse.json();
         const currentRegionKey = updateRegionOptions(regionPayload.regions, true);
         if (!currentRegionKey) {
@@ -487,13 +668,19 @@
 
         const framesPayload = await framesResponse.json();
         const nextFrames = framesPayload.frames;
+        const regionChanged = currentRegionKey !== previousRegionKey;
         const previousLatestFilename = currentFrames[currentFrames.length - 1]?.filename;
         const nextLatestFilename = nextFrames[nextFrames.length - 1]?.filename;
         const frameCountChanged = nextFrames.length !== currentFrames.length;
         const latestFrameChanged = previousLatestFilename !== nextLatestFilename;
 
-        if (!frameCountChanged && !latestFrameChanged) {
+        if (!regionChanged && !frameCountChanged && !latestFrameChanged) {
           return;
+        }
+
+        activeRegionToken = `${currentRegionKey}:${Date.now()}`;
+        if (regionChanged) {
+          clearFrameState();
         }
 
         const previousFilename = currentFrames[currentFrameIndex]?.filename;
@@ -516,7 +703,7 @@
           }
         }
 
-        renderFrame(nextIndex);
+        await renderFrame(nextIndex);
       } catch {
         return;
       }
@@ -535,20 +722,28 @@
     });
 
     frameSlider.addEventListener('input', (event) => {
-      renderFrame(Number(event.target.value));
+      void renderFrame(Number(event.target.value));
     });
 
     document.addEventListener('keydown', (event) => {
       if (!currentFrames.length) {
+        if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'v') {
+          window.location.href = '/vault-archive';
+        }
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'v') {
+        window.location.href = '/vault-archive';
         return;
       }
 
       if (event.key === 'ArrowLeft') {
-        renderFrame(Math.max(currentFrameIndex - 1, 0));
+        void renderFrame(Math.max(currentFrameIndex - 1, 0));
       }
 
       if (event.key === 'ArrowRight') {
-        renderFrame(Math.min(currentFrameIndex + 1, currentFrames.length - 1));
+        void renderFrame(Math.min(currentFrameIndex + 1, currentFrames.length - 1));
       }
     });
 
