@@ -23,6 +23,17 @@ TIMESTAMP_PATTERN = re.compile(r"(\d{8}_\d{4})$")
 
 app = Flask(__name__)
 
+REGION_ORDER = {
+    "tornado_warnings": 0,
+    "severe_thunderstorm_warnings": 1,
+    "conus": 2,
+    "northeast": 3,
+    "southeast": 4,
+    "south_central": 5,
+    "north_central": 6,
+    "western": 7,
+}
+
 
 def run_script(script_path: str, working_directory: str, retries: int) -> None:
     script_name = Path(script_path).stem
@@ -75,6 +86,8 @@ def run_scripts(
 
 def region_label(region_key: str) -> str:
     labels = {
+        "tornado_warnings": "Tornado Warnings",
+        "severe_thunderstorm_warnings": "Severe Thunderstorm Warnings",
         "conus": "CONUS",
         "northeast": "Northeast / Mid-Atlantic US",
         "southeast": "Southeast US",
@@ -119,7 +132,11 @@ def list_regions() -> list[dict[str, str | int]]:
         return []
 
     regions: list[dict[str, str | int]] = []
-    for region_dir in sorted(path for path in ARCHIVE_ROOT.iterdir() if path.is_dir()):
+    region_dirs = sorted(
+        (path for path in ARCHIVE_ROOT.iterdir() if path.is_dir()),
+        key=lambda path: (REGION_ORDER.get(path.name, 99), region_label(path.name)),
+    )
+    for region_dir in region_dirs:
         frames = list_region_frames(region_dir.name)
         regions.append(
             {
