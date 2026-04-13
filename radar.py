@@ -37,6 +37,8 @@ MAX_DBZ = 70.0
 OUTPUT_DPI = 300
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 REGION_PADDING_FRACTION = 0.05
+WARNING_REGION_PADDING_FRACTION = 0.18
+WARNING_REGION_MIN_SPAN_DEGREES = 5.0
 RETENTION_DAYS = 10
 NWS_REQUEST_HEADERS = {
     "Accept": "application/geo+json",
@@ -54,6 +56,18 @@ WARNING_EVENT_STYLES: dict[str, dict[str, object]] = {
         "facecolor": "#ffa500",
         "linewidth": 1.4,
         "label": "Severe Tstm Warning",
+    },
+}
+WARNING_REGION_DEFINITIONS: dict[str, dict[str, str]] = {
+    "tornado_warnings": {
+        "event": "Tornado Warning",
+        "label": "Tornado Warnings",
+        "title": "Tornado Warning Focus",
+    },
+    "severe_thunderstorm_warnings": {
+        "event": "Severe Thunderstorm Warning",
+        "label": "Severe Thunderstorm Warnings",
+        "title": "Severe Thunderstorm Warning Focus",
     },
 }
 
@@ -248,7 +262,7 @@ western_gdf, WESTERN_EXTENT, western_outline, western_states_gdf = get_region_ge
     WESTERN_STATE_FIPS,
 )
 
-REGION_CONFIGS: dict[str, dict[str, object]] = {
+BASE_REGION_CONFIGS: dict[str, dict[str, object]] = {
     "northeast": {
         "label": "Northeast",
         "title": "Northeast/Mid-Atlantic US",
@@ -297,6 +311,94 @@ REGION_CONFIGS: dict[str, dict[str, object]] = {
         "states_gdf": get_census_states_geodataframe(),
     },
 }
+
+
+def normalize_extent(
+    min_lon: float,
+    max_lon: float,
+    min_lat: float,
+    max_lat: float,
+    padding_frac: float,
+    min_span_degrees: float,
+) -> tuple[float, float, float, float]:
+    lon_span = max(max_lon - min_lon, min_span_degrees)
+    lat_span = max(max_lat - min_lat, min_span_degrees)
+    lon_center = (min_lon + max_lon) / 2.0
+    lat_center = (min_lat + max_lat) / 2.0
+    lon_half_span = (lon_span * (1.0 + padding_frac)) / 2.0
+    lat_half_span = (lat_span * (1.0 + padding_frac)) / 2.0
+
+    return (
+        max(CONUS_EXTENT[0], lon_center - lon_half_span),
+        min(CONUS_EXTENT[1], lon_center + lon_half_span),
+        max(CONUS_EXTENT[2], lat_center - lat_half_span),
+        min(CONUS_EXTENT[3], lat_center + lat_half_span),
+    )
+
+
+def subset_geodata_to_extent(
+    counties: gpd.GeoDataFrame,
+    states: gpd.GeoDataFrame,
+    subset_extent: tuple[float, float, float, float],
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    min_lon, max_lon, min_lat, max_lat = subset_extent
+    extent_polygon = box(min_lon, min_lat, max_lon, max_lat)
+
+    subset_counties = counties[counties.intersects(extent_polygon)].reset_index(drop=True)
+    subset_states = states[states.intersects(extent_polygon)].reset_index(drop=True)
+    return subset_counties, subset_states
+
+
+def build_warning_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, object]]:
+    if warnings_gdf.empty:
+        return {}
+
+    counties = get_county_geodataframe()
+    states = get_census_states_geodataframe()
+    region_configs: dict[str, dict[str, object]] = {}
+
+    for region_key, warning_definition in WARNING_REGION_DEFINITIONS.items():
+        event_name = warning_definition["event"]
+        event_warnings = warnings_gdf[warnings_gdf["event"] == event_name].copy()
+        if event_warnings.empty:
+            continue
+
+        min_lon, min_lat, max_lon, max_lat = event_warnings.total_bounds
+        extent = normalize_extent(
+            float(min_lon),
+            float(max_lon),
+            float(min_lat),
+            float(max_lat),
+            padding_frac=WARNING_REGION_PADDING_FRACTION,
+            min_span_degrees=WARNING_REGION_MIN_SPAN_DEGREES,
+        )
+        region_counties, region_states = subset_geodata_to_extent(counties, states, extent)
+
+        region_configs[region_key] = {
+            "label": warning_definition["label"],
+            "title": warning_definition["title"],
+            "extent": extent,
+            "counties_gdf": region_counties,
+            "states_gdf": region_states,
+        }
+
+    return region_configs
+
+
+def build_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, object]]:
+    region_configs = dict(BASE_REGION_CONFIGS)
+    region_configs.update(build_warning_region_configs(warnings_gdf))
+    return region_configs
+
+
+def clear_inactive_warning_archives(active_warning_region_keys: set[str]) -> None:
+    for region_key in WARNING_REGION_DEFINITIONS:
+        if region_key in active_warning_region_keys:
+            continue
+
+        region_dir = ARCHIVE_ROOT / region_key
+        if region_dir.exists():
+            shutil.rmtree(region_dir)
 
 
 def build_output_path(output_path: Path, region_key: str) -> Path:
@@ -384,12 +486,11 @@ def subset_radar_grid(
     return lon_grid, lat_grid, subset
 
 
-def build_title(valid_time: pd.Timestamp, region_key: str) -> str:
+def build_title(valid_time: pd.Timestamp, region_title: str) -> str:
     eastern_time = valid_time.tz_convert(EASTERN_TIMEZONE)
-    region_label = str(REGION_CONFIGS[region_key]["title"])
     return (
         "MRMS Reflectivity At Lowest Altitude\n"
-        f"{region_label} | Valid {eastern_time:%Y-%m-%d %I:%M %p %Z}"
+        f"{region_title} | Valid {eastern_time:%Y-%m-%d %I:%M %p %Z}"
     )
 
 
@@ -398,6 +499,7 @@ def plot_radar(
     states: gpd.GeoDataFrame,
     warnings_gdf: gpd.GeoDataFrame,
     region_key: str,
+    region_title: str,
     subset_extent: tuple[float, float, float, float],
     lon_grid: np.ndarray,
     lat_grid: np.ndarray,
@@ -507,7 +609,7 @@ def plot_radar(
     )
     colorbar.set_label("Reflectivity (dBZ)")
 
-    axis.set_title(build_title(valid_time, region_key), fontsize=13, pad=14)
+    axis.set_title(build_title(valid_time, region_title), fontsize=13, pad=14)
     plt.tight_layout()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -560,8 +662,11 @@ def main() -> None:
     args = parse_args()
     lon_1d, lat_1d, values, valid_time = load_radar_grid(args.radar_url)
     warnings_gdf = fetch_active_warning_polygons()
+    region_configs = build_region_configs(warnings_gdf)
+    active_warning_region_keys = set(region_configs).intersection(WARNING_REGION_DEFINITIONS)
+    clear_inactive_warning_archives(active_warning_region_keys)
 
-    for region_key, region_config in REGION_CONFIGS.items():
+    for region_key, region_config in region_configs.items():
         print(f"Generating PNG for {region_key}...")
         extent = region_config["extent"]
         lon_grid, lat_grid, reflectivity = subset_radar_grid(lon_1d, lat_1d, values, extent)
@@ -570,6 +675,7 @@ def main() -> None:
             states=region_config["states_gdf"],
             warnings_gdf=warnings_gdf,
             region_key=region_key,
+            region_title=str(region_config["title"]),
             subset_extent=extent,
             lon_grid=lon_grid,
             lat_grid=lat_grid,
