@@ -40,7 +40,8 @@ REGION_PADDING_FRACTION = 0.05
 WARNING_REGION_PADDING_FRACTION = 0.18
 WARNING_REGION_MIN_SPAN_DEGREES = 5.0
 WARNING_CLUSTER_DISTANCE_DEGREES = 3.5
-RETENTION_DAYS = 10
+STANDARD_RETENTION_DAYS = 10
+WARNING_RETENTION_DAYS: int | None = 90
 NWS_REQUEST_HEADERS = {
     "Accept": "application/geo+json",
     "User-Agent": "RadarArchiverWebsite/1.0 (contact: local-use)",
@@ -428,21 +429,11 @@ def build_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, 
     return region_configs
 
 
-def clear_inactive_warning_archives(active_warning_region_keys: set[str]) -> None:
-    for region_dir in ARCHIVE_ROOT.iterdir() if ARCHIVE_ROOT.exists() else []:
-        if not region_dir.is_dir():
-            continue
-
-        if not any(
-            region_dir.name == base_region_key or region_dir.name.startswith(f"{base_region_key}_")
-            for base_region_key in WARNING_REGION_DEFINITIONS
-        ):
-            continue
-
-        if region_dir.name in active_warning_region_keys:
-            continue
-
-        shutil.rmtree(region_dir)
+def is_warning_region_key(region_key: str) -> bool:
+    return any(
+        region_key == base_region_key or region_key.startswith(f"{base_region_key}_")
+        for base_region_key in WARNING_REGION_DEFINITIONS
+    )
 
 
 def build_output_path(output_path: Path, region_key: str) -> Path:
@@ -453,8 +444,11 @@ def build_output_path(output_path: Path, region_key: str) -> Path:
 
 
 def build_archive_output_path(region_key: str, valid_time: pd.Timestamp) -> Path:
+    eastern_time = valid_time.tz_convert(EASTERN_TIMEZONE)
     timestamp = valid_time.tz_convert(timezone.utc).strftime("%Y%m%d_%H%M")
     region_dir = ARCHIVE_ROOT / region_key
+    if is_warning_region_key(region_key):
+        region_dir = region_dir / eastern_time.strftime("%y-%m-%d")
     return region_dir / f"mrms_{region_key}_{timestamp}.png"
 
 
@@ -474,6 +468,30 @@ def prune_archived_files(archive_root: Path, pattern: str, retention_days: int) 
         modified_time = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
         if modified_time < cutoff:
             file_path.unlink(missing_ok=True)
+
+
+def prune_empty_directories(archive_root: Path) -> None:
+    if not archive_root.exists():
+        return
+
+    for directory in sorted((path for path in archive_root.rglob("*") if path.is_dir()), reverse=True):
+        try:
+            next(directory.iterdir())
+        except StopIteration:
+            directory.rmdir()
+
+
+def prune_radar_archives(archive_root: Path) -> None:
+    if not archive_root.exists():
+        return
+
+    for region_dir in (path for path in archive_root.iterdir() if path.is_dir()):
+        retention_days = WARNING_RETENTION_DAYS if is_warning_region_key(region_dir.name) else STANDARD_RETENTION_DAYS
+        if retention_days is None:
+            continue
+        prune_archived_files(region_dir, "*.png", retention_days)
+
+    prune_empty_directories(archive_root)
 
 
 def load_radar_grid(url: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.Timestamp]:
@@ -707,15 +725,6 @@ def main() -> None:
     lon_1d, lat_1d, values, valid_time = load_radar_grid(args.radar_url)
     warnings_gdf = fetch_active_warning_polygons()
     region_configs = build_region_configs(warnings_gdf)
-    active_warning_region_keys = {
-        region_key
-        for region_key in region_configs
-        if any(
-            region_key == base_region_key or region_key.startswith(f"{base_region_key}_")
-            for base_region_key in WARNING_REGION_DEFINITIONS
-        )
-    }
-    clear_inactive_warning_archives(active_warning_region_keys)
 
     for region_key, region_config in region_configs.items():
         print(f"Generating PNG for {region_key}...")
@@ -738,8 +747,9 @@ def main() -> None:
         del lon_grid, lat_grid, reflectivity
         gc.collect()
 
-    prune_archived_files(ARCHIVE_ROOT, "*.png", RETENTION_DAYS)
-    prune_archived_files(GRIB_ARCHIVE_ROOT, "*.grib2", RETENTION_DAYS)
+    prune_radar_archives(ARCHIVE_ROOT)
+    prune_archived_files(GRIB_ARCHIVE_ROOT, "*.grib2", STANDARD_RETENTION_DAYS)
+    prune_empty_directories(GRIB_ARCHIVE_ROOT)
 
 
 if __name__ == "__main__":
