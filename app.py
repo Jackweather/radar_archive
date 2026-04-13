@@ -35,6 +35,13 @@ REGION_ORDER = {
 }
 
 
+def split_region_key(region_key: str) -> tuple[str, int | None]:
+    match = re.match(r"^(.*)_(\d+)$", region_key)
+    if not match:
+        return region_key, None
+    return match.group(1), int(match.group(2))
+
+
 def run_script(script_path: str, working_directory: str, retries: int) -> None:
     script_name = Path(script_path).stem
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
@@ -85,6 +92,7 @@ def run_scripts(
 
 
 def region_label(region_key: str) -> str:
+    base_region_key, region_index = split_region_key(region_key)
     labels = {
         "tornado_warnings": "Tornado Warnings",
         "severe_thunderstorm_warnings": "Severe Thunderstorm Warnings",
@@ -95,7 +103,10 @@ def region_label(region_key: str) -> str:
         "north_central": "North Central US",
         "western": "Western US",
     }
-    return labels.get(region_key, region_key.replace("_", " ").title())
+    label = labels.get(base_region_key, base_region_key.replace("_", " ").title())
+    if region_index is None:
+        return label
+    return f"{label} {region_index}"
 
 
 def parse_frame_time(png_path: Path) -> datetime | None:
@@ -111,19 +122,21 @@ def list_region_frames(region_key: str) -> list[dict[str, str]]:
         return []
 
     frames: list[dict[str, str]] = []
-    for png_path in sorted(region_dir.glob("*.png")):
+    for png_path in sorted(region_dir.rglob("*.png")):
         frame_time = parse_frame_time(png_path)
         if frame_time is None:
             continue
         eastern_time = frame_time.astimezone(EASTERN_TIMEZONE)
+        relative_path = png_path.relative_to(region_dir).as_posix()
         frames.append(
             {
-                "filename": png_path.name,
+                "filename": relative_path,
                 "timestamp": frame_time.isoformat(),
                 "displayTime": eastern_time.strftime("%Y-%m-%d %I:%M %p %Z"),
-                "url": f"/images/{region_key}/{png_path.name}",
+                "url": f"/images/{region_key}/{relative_path}",
             }
         )
+    frames.sort(key=lambda frame: frame["timestamp"])
     return frames
 
 
@@ -132,9 +145,18 @@ def list_regions() -> list[dict[str, str | int]]:
         return []
 
     regions: list[dict[str, str | int]] = []
+
+    def region_sort_key(path: Path) -> tuple[int, int, str]:
+        base_region_key, region_index = split_region_key(path.name)
+        return (
+            REGION_ORDER.get(base_region_key, 99),
+            region_index or 0,
+            region_label(path.name),
+        )
+
     region_dirs = sorted(
         (path for path in ARCHIVE_ROOT.iterdir() if path.is_dir()),
-        key=lambda path: (REGION_ORDER.get(path.name, 99), region_label(path.name)),
+        key=region_sort_key,
     )
     for region_dir in region_dirs:
         frames = list_region_frames(region_dir.name)
