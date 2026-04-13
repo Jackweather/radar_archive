@@ -39,6 +39,7 @@ EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 REGION_PADDING_FRACTION = 0.05
 WARNING_REGION_PADDING_FRACTION = 0.18
 WARNING_REGION_MIN_SPAN_DEGREES = 5.0
+WARNING_CLUSTER_DISTANCE_DEGREES = 3.5
 RETENTION_DAYS = 10
 NWS_REQUEST_HEADERS = {
     "Accept": "application/geo+json",
@@ -349,6 +350,38 @@ def subset_geodata_to_extent(
     return subset_counties, subset_states
 
 
+def build_warning_cluster_geometries(event_warnings: gpd.GeoDataFrame) -> list[object]:
+    if event_warnings.empty:
+        return []
+
+    buffered_geometries = event_warnings.geometry.buffer(WARNING_CLUSTER_DISTANCE_DEGREES / 2.0)
+    unclustered_indices = set(range(len(buffered_geometries)))
+    cluster_geometries: list[object] = []
+
+    while unclustered_indices:
+        seed_index = unclustered_indices.pop()
+        cluster_indices = {seed_index}
+        pending_indices = [seed_index]
+
+        while pending_indices:
+            current_index = pending_indices.pop()
+            current_geometry = buffered_geometries.iloc[current_index]
+            nearby_indices = [
+                other_index
+                for other_index in list(unclustered_indices)
+                if current_geometry.intersects(buffered_geometries.iloc[other_index])
+            ]
+
+            for nearby_index in nearby_indices:
+                unclustered_indices.remove(nearby_index)
+                cluster_indices.add(nearby_index)
+                pending_indices.append(nearby_index)
+
+        cluster_geometries.append(event_warnings.iloc[sorted(cluster_indices)].union_all())
+
+    return cluster_geometries
+
+
 def build_warning_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, object]]:
     if warnings_gdf.empty:
         return {}
@@ -363,24 +396,28 @@ def build_warning_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, di
         if event_warnings.empty:
             continue
 
-        min_lon, min_lat, max_lon, max_lat = event_warnings.total_bounds
-        extent = normalize_extent(
-            float(min_lon),
-            float(max_lon),
-            float(min_lat),
-            float(max_lat),
-            padding_frac=WARNING_REGION_PADDING_FRACTION,
-            min_span_degrees=WARNING_REGION_MIN_SPAN_DEGREES,
-        )
-        region_counties, region_states = subset_geodata_to_extent(counties, states, extent)
+        cluster_geometries = build_warning_cluster_geometries(event_warnings)
+        for cluster_index, cluster_geometry in enumerate(cluster_geometries, start=1):
+            min_lon, min_lat, max_lon, max_lat = cluster_geometry.bounds
+            extent = normalize_extent(
+                float(min_lon),
+                float(max_lon),
+                float(min_lat),
+                float(max_lat),
+                padding_frac=WARNING_REGION_PADDING_FRACTION,
+                min_span_degrees=WARNING_REGION_MIN_SPAN_DEGREES,
+            )
+            region_counties, region_states = subset_geodata_to_extent(counties, states, extent)
+            cluster_region_key = f"{region_key}_{cluster_index}"
+            cluster_label = f"{warning_definition['label']} {cluster_index}"
 
-        region_configs[region_key] = {
-            "label": warning_definition["label"],
-            "title": warning_definition["title"],
-            "extent": extent,
-            "counties_gdf": region_counties,
-            "states_gdf": region_states,
-        }
+            region_configs[cluster_region_key] = {
+                "label": cluster_label,
+                "title": cluster_label,
+                "extent": extent,
+                "counties_gdf": region_counties,
+                "states_gdf": region_states,
+            }
 
     return region_configs
 
@@ -392,13 +429,20 @@ def build_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, 
 
 
 def clear_inactive_warning_archives(active_warning_region_keys: set[str]) -> None:
-    for region_key in WARNING_REGION_DEFINITIONS:
-        if region_key in active_warning_region_keys:
+    for region_dir in ARCHIVE_ROOT.iterdir() if ARCHIVE_ROOT.exists() else []:
+        if not region_dir.is_dir():
             continue
 
-        region_dir = ARCHIVE_ROOT / region_key
-        if region_dir.exists():
-            shutil.rmtree(region_dir)
+        if not any(
+            region_dir.name == base_region_key or region_dir.name.startswith(f"{base_region_key}_")
+            for base_region_key in WARNING_REGION_DEFINITIONS
+        ):
+            continue
+
+        if region_dir.name in active_warning_region_keys:
+            continue
+
+        shutil.rmtree(region_dir)
 
 
 def build_output_path(output_path: Path, region_key: str) -> Path:
@@ -663,7 +707,14 @@ def main() -> None:
     lon_1d, lat_1d, values, valid_time = load_radar_grid(args.radar_url)
     warnings_gdf = fetch_active_warning_polygons()
     region_configs = build_region_configs(warnings_gdf)
-    active_warning_region_keys = set(region_configs).intersection(WARNING_REGION_DEFINITIONS)
+    active_warning_region_keys = {
+        region_key
+        for region_key in region_configs
+        if any(
+            region_key == base_region_key or region_key.startswith(f"{base_region_key}_")
+            for base_region_key in WARNING_REGION_DEFINITIONS
+        )
+    }
     clear_inactive_warning_archives(active_warning_region_keys)
 
     for region_key, region_config in region_configs.items():
