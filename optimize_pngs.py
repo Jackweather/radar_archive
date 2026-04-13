@@ -8,8 +8,20 @@ from pathlib import Path
 from PIL import Image
 
 
-DEFAULT_INPUTS = (Path("."),)
+DEFAULT_INPUT_CANDIDATES = (
+    Path("/var/data/mrms_radar_archive"),
+    Path("/var/data"),
+    Path("."),
+)
 DEFAULT_MAX_COLORS = 192
+DEFAULT_EXCLUDED_DIR_NAMES = {
+    ".git",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+}
 
 
 @dataclass
@@ -22,6 +34,7 @@ class OptimizationResult:
 
 
 def parse_args() -> argparse.Namespace:
+    default_paths = [str(path) for path in get_default_input_paths()]
     parser = argparse.ArgumentParser(
         description="Reduce PNG file sizes by optimizing and optionally palette-quantizing them."
     )
@@ -29,8 +42,11 @@ def parse_args() -> argparse.Namespace:
         "paths",
         nargs="*",
         type=Path,
-        default=list(DEFAULT_INPUTS),
-        help="PNG files or directories to process. Defaults to the current directory.",
+        default=get_default_input_paths(),
+        help=(
+            "PNG files or directories to process. Defaults to "
+            f"{', '.join(default_paths)}."
+        ),
     )
     parser.add_argument(
         "--no-recursive",
@@ -48,10 +64,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Report potential savings without modifying files.",
     )
+    parser.add_argument(
+        "--include-excluded-dirs",
+        action="store_true",
+        help="Also scan normally excluded folders such as .venv and __pycache__.",
+    )
     return parser.parse_args()
 
 
-def iter_png_files(paths: list[Path], recursive: bool) -> list[Path]:
+def get_default_input_paths() -> list[Path]:
+    for candidate in DEFAULT_INPUT_CANDIDATES:
+        if candidate.exists():
+            return [candidate]
+    return [Path(".")]
+
+
+def iter_png_files(paths: list[Path], recursive: bool, include_excluded_dirs: bool) -> list[Path]:
     discovered: set[Path] = set()
     for input_path in paths:
         if input_path.is_file() and input_path.suffix.lower() == ".png":
@@ -61,12 +89,27 @@ def iter_png_files(paths: list[Path], recursive: bool) -> list[Path]:
         if not input_path.is_dir():
             continue
 
-        pattern = "**/*.png" if recursive else "*.png"
-        for png_path in input_path.glob(pattern):
-            if png_path.is_file():
-                discovered.add(png_path)
+        if recursive:
+            for root, dir_names, file_names in walk_png_directories(input_path, include_excluded_dirs=include_excluded_dirs):
+                root_path = Path(root)
+                for file_name in file_names:
+                    if file_name.lower().endswith(".png"):
+                        discovered.add(root_path / file_name)
+        else:
+            for png_path in input_path.glob("*.png"):
+                if png_path.is_file():
+                    discovered.add(png_path)
 
     return sorted(discovered)
+
+
+def walk_png_directories(input_path: Path, include_excluded_dirs: bool):
+    for current_path, dir_names, file_names in __import__("os").walk(input_path):
+        if not include_excluded_dirs:
+            dir_names[:] = [
+                dir_name for dir_name in dir_names if dir_name not in DEFAULT_EXCLUDED_DIR_NAMES
+            ]
+        yield current_path, dir_names, file_names
 
 
 def build_optimized_png_bytes(image: Image.Image, max_colors: int) -> bytes:
@@ -126,7 +169,11 @@ def main() -> None:
     if args.max_colors < 0 or args.max_colors > 256:
         raise SystemExit("--max-colors must be between 0 and 256")
 
-    png_paths = iter_png_files(args.paths, recursive=not args.no_recursive)
+    png_paths = iter_png_files(
+        args.paths,
+        recursive=not args.no_recursive,
+        include_excluded_dirs=args.include_excluded_dirs,
+    )
     if not png_paths:
         raise SystemExit("No PNG files found.")
 
