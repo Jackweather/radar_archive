@@ -426,7 +426,7 @@
     let isProcessingPreloadQueue = false;
 
     function getModeLabel(mode) {
-      return mode === 'regions' ? 'Region' : 'Warning Area';
+      return mode === 'regions' ? 'Region' : 'State';
     }
 
     function getEmptyMessage(mode) {
@@ -726,12 +726,12 @@
     }
 
     async function loadFrames(regionKey, preservePosition = false) {
-      const archiveLabel = currentMode === 'regions' ? 'region archive' : 'warning archive';
+      const archiveLabel = currentMode === 'regions' ? 'region archive' : 'state archive';
       showLoading('Loading archive', `Preparing saved radar PNGs for the selected ${archiveLabel}.`, 0, 0);
 
       const response = await fetch(`/api/frames/${regionKey}`, { cache: 'no-store' });
       if (!response.ok) {
-        renderEmpty(`Unable to load frames for this ${currentMode === 'regions' ? 'region' : 'warning area'}.`);
+        renderEmpty(`Unable to load frames for this ${currentMode === 'regions' ? 'region' : 'state'}.`);
         return;
       }
 
