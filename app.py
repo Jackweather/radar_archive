@@ -223,43 +223,26 @@ def list_warning_regions(event_name: str) -> list[dict[str, str | int]]:
         metadata = load_warning_region_metadata(region_dir.name)
         events = {str(name) for name in metadata.get("events", []) if name}
 
-        if region_dir.name.startswith(WARNING_REGION_PREFIX):
-            if event_name not in events:
-                continue
-        elif event_name == WARNING_VIEW_DEFINITIONS["tornado"]["event"]:
-            if not (region_dir.name == "tornado_warnings" or region_dir.name.startswith("tornado_warnings_")):
-                continue
-        elif event_name == WARNING_VIEW_DEFINITIONS["severe"]["event"]:
-            if not (
-                region_dir.name == "severe_thunderstorm_warnings"
-                or region_dir.name.startswith("severe_thunderstorm_warnings_")
-            ):
+        if not region_dir.name.startswith(WARNING_REGION_PREFIX):
+            continue
+        if metadata.get("grouping") != "state":
+            continue
+        if event_name not in events:
                 continue
 
         frames = list_region_frames(region_dir.name)
         if not frames:
             continue
 
-        latest_timestamp = frames[-1]["timestamp"]
         warning_regions.append(
             {
                 "key": region_dir.name,
                 "label": region_label(region_dir.name),
                 "frameCount": len(frames),
-                "latestTimestamp": latest_timestamp,
             }
         )
 
-    warning_regions.sort(
-        key=lambda region: (
-            str(region["latestTimestamp"]),
-            str(region["label"]),
-        ),
-        reverse=True,
-    )
-
-    for region in warning_regions:
-        region.pop("latestTimestamp", None)
+    warning_regions.sort(key=lambda region: str(region["label"]))
 
     return warning_regions
 
