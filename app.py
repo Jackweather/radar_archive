@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
-from collections import defaultdict
+import json
 import re
 import subprocess
 import sys
@@ -19,19 +19,31 @@ GRIB_ARCHIVE_ROOT = BASE_DIR / "mrms_grib_archive"
 LOG_ROOT = BASE_DIR / "logs"
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 TIMESTAMP_PATTERN = re.compile(r"(\d{8}_\d{4})$")
+WARNING_REGION_PREFIX = "warning_region_"
+WARNING_METADATA_FILENAME = "metadata.json"
+LEGACY_WARNING_REGION_PREFIXES = ("tornado_warnings", "severe_thunderstorm_warnings")
 
 
 app = Flask(__name__)
 
 REGION_ORDER = {
-    "tornado_warnings": 0,
-    "severe_thunderstorm_warnings": 1,
-    "conus": 2,
-    "northeast": 3,
-    "southeast": 4,
-    "south_central": 5,
-    "north_central": 6,
-    "western": 7,
+    "conus": 0,
+    "northeast": 1,
+    "southeast": 2,
+    "south_central": 3,
+    "north_central": 4,
+    "western": 5,
+}
+
+WARNING_VIEW_DEFINITIONS = {
+    "tornado": {
+        "label": "Tornado Warnings",
+        "event": "Tornado Warning",
+    },
+    "severe": {
+        "label": "Severe Thunderstorm Warnings",
+        "event": "Severe Thunderstorm Warning",
+    },
 }
 
 
@@ -92,6 +104,10 @@ def run_scripts(
 
 
 def region_label(region_key: str) -> str:
+    metadata = load_warning_region_metadata(region_key)
+    if metadata.get("label"):
+        return str(metadata["label"])
+
     base_region_key, region_index = split_region_key(region_key)
     labels = {
         "tornado_warnings": "Tornado Warnings",
@@ -114,6 +130,33 @@ def parse_frame_time(png_path: Path) -> datetime | None:
     if not match:
         return None
     return datetime.strptime(match.group(1), "%Y%m%d_%H%M").replace(tzinfo=ZoneInfo("UTC"))
+
+
+def is_warning_region_key(region_key: str) -> bool:
+    if region_key.startswith(WARNING_REGION_PREFIX):
+        return True
+    return any(
+        region_key == prefix or region_key.startswith(f"{prefix}_")
+        for prefix in LEGACY_WARNING_REGION_PREFIXES
+    )
+
+
+def warning_metadata_path(region_key: str) -> Path:
+    return ARCHIVE_ROOT / region_key / WARNING_METADATA_FILENAME
+
+
+def load_warning_region_metadata(region_key: str) -> dict[str, object]:
+    if not region_key.startswith(WARNING_REGION_PREFIX):
+        return {}
+
+    metadata_path = warning_metadata_path(region_key)
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def list_region_frames(region_key: str) -> list[dict[str, str]]:
@@ -155,7 +198,7 @@ def list_regions() -> list[dict[str, str | int]]:
         )
 
     region_dirs = sorted(
-        (path for path in ARCHIVE_ROOT.iterdir() if path.is_dir()),
+        (path for path in ARCHIVE_ROOT.iterdir() if path.is_dir() and not is_warning_region_key(path.name)),
         key=region_sort_key,
     )
     for region_dir in region_dirs:
@@ -168,6 +211,70 @@ def list_regions() -> list[dict[str, str | int]]:
             }
         )
     return regions
+
+
+def list_warning_regions(event_name: str) -> list[dict[str, str | int]]:
+    if not ARCHIVE_ROOT.exists():
+        return []
+
+    warning_regions: list[dict[str, str | int]] = []
+
+    for region_dir in (path for path in ARCHIVE_ROOT.iterdir() if path.is_dir() and is_warning_region_key(path.name)):
+        metadata = load_warning_region_metadata(region_dir.name)
+        events = {str(name) for name in metadata.get("events", []) if name}
+
+        if region_dir.name.startswith(WARNING_REGION_PREFIX):
+            if event_name not in events:
+                continue
+        elif event_name == WARNING_VIEW_DEFINITIONS["tornado"]["event"]:
+            if not (region_dir.name == "tornado_warnings" or region_dir.name.startswith("tornado_warnings_")):
+                continue
+        elif event_name == WARNING_VIEW_DEFINITIONS["severe"]["event"]:
+            if not (
+                region_dir.name == "severe_thunderstorm_warnings"
+                or region_dir.name.startswith("severe_thunderstorm_warnings_")
+            ):
+                continue
+
+        frames = list_region_frames(region_dir.name)
+        if not frames:
+            continue
+
+        latest_timestamp = frames[-1]["timestamp"]
+        warning_regions.append(
+            {
+                "key": region_dir.name,
+                "label": region_label(region_dir.name),
+                "frameCount": len(frames),
+                "latestTimestamp": latest_timestamp,
+            }
+        )
+
+    warning_regions.sort(
+        key=lambda region: (
+            str(region["latestTimestamp"]),
+            str(region["label"]),
+        ),
+        reverse=True,
+    )
+
+    for region in warning_regions:
+        region.pop("latestTimestamp", None)
+
+    return warning_regions
+
+
+def list_viewer_options() -> dict[str, object]:
+    return {
+        "regions": list_regions(),
+        "warnings": {
+            warning_key: {
+                "label": str(definition["label"]),
+                "regions": list_warning_regions(str(definition["event"])),
+            }
+            for warning_key, definition in WARNING_VIEW_DEFINITIONS.items()
+        },
+    }
 
 
 def list_grib_inventory() -> list[dict[str, object]]:
@@ -224,6 +331,11 @@ def run_task1():
 @app.route("/api/regions")
 def api_regions():
     return jsonify({"regions": list_regions()})
+
+
+@app.route("/api/viewer-options")
+def api_viewer_options():
+    return jsonify(list_viewer_options())
 
 
 @app.route("/api/frames/<region_key>")
