@@ -176,6 +176,40 @@
       box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.22);
     }
 
+    .mode-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .mode-button {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      padding: 8px 14px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+    }
+
+    .mode-button:hover,
+    .mode-button:focus {
+      border-color: rgba(102, 217, 239, 0.4);
+      color: var(--text);
+      outline: none;
+      transform: translateY(-1px);
+    }
+
+    .mode-button.is-active {
+      background: rgba(102, 217, 239, 0.16);
+      border-color: rgba(102, 217, 239, 0.48);
+      color: var(--text);
+    }
+
     .control-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
@@ -323,9 +357,14 @@
     </main>
 
     <section class="controls">
+      <div class="mode-row" role="tablist" aria-label="Archive views">
+        <button type="button" class="mode-button is-active" data-mode-button="regions">Regions</button>
+        <button type="button" class="mode-button" data-mode-button="tornado">Tornado Warnings</button>
+        <button type="button" class="mode-button" data-mode-button="severe">Severe Thunderstorm Warnings</button>
+      </div>
       <div class="control-row">
         <div class="field">
-          <label for="region-select">Region</label>
+          <label id="region-label" for="region-select">Region</label>
           <select id="region-select"></select>
         </div>
         <div class="field">
@@ -343,6 +382,8 @@
 
   <script>
     const viewer = document.getElementById('viewer');
+    const modeButtons = Array.from(document.querySelectorAll('[data-mode-button]'));
+    const regionLabel = document.getElementById('region-label');
     const regionSelect = document.getElementById('region-select');
     const frameSlider = document.getElementById('frame-slider');
     const framePosition = document.getElementById('frame-position');
@@ -358,11 +399,24 @@
 
     let currentFrames = [];
     let currentFrameIndex = 0;
+    let currentMode = 'regions';
     let selectedRegionKey = '';
+    const selectedRegionKeysByMode = {
+      regions: '',
+      tornado: '',
+      severe: '',
+    };
     let followLatestFrame = true;
     let refreshTimerId = 0;
     let requestedFrameIndex = -1;
     let activeRegionToken = '';
+    let viewerOptions = {
+      regions: [],
+      warnings: {
+        tornado: { regions: [] },
+        severe: { regions: [] },
+      },
+    };
 
     const frameCache = new Map();
     const pendingFrameLoads = new Map();
@@ -371,8 +425,43 @@
     const MAX_CACHED_FRAMES = 36;
     let isProcessingPreloadQueue = false;
 
+    function getModeLabel(mode) {
+      return mode === 'regions' ? 'Region' : 'Warning Area';
+    }
+
+    function getEmptyMessage(mode) {
+      if (mode === 'tornado') {
+        return 'No archived tornado warning PNGs found yet.';
+      }
+
+      if (mode === 'severe') {
+        return 'No archived severe thunderstorm warning PNGs found yet.';
+      }
+
+      return 'No archived PNGs found yet.';
+    }
+
+    function getCurrentModeRegions() {
+      if (currentMode === 'regions') {
+        return viewerOptions.regions || [];
+      }
+
+      return viewerOptions.warnings?.[currentMode]?.regions || [];
+    }
+
+    function setActiveMode(mode) {
+      currentMode = mode;
+      regionLabel.textContent = getModeLabel(mode);
+
+      for (const button of modeButtons) {
+        button.classList.toggle('is-active', button.dataset.modeButton === mode);
+      }
+    }
+
     function updateRegionOptions(regions, preserveSelection = true) {
-      const previousSelection = preserveSelection ? selectedRegionKey || regionSelect.value : '';
+      const previousSelection = preserveSelection
+        ? selectedRegionKeysByMode[currentMode] || selectedRegionKey || regionSelect.value
+        : '';
       regionSelect.innerHTML = '';
 
       for (const region of regions) {
@@ -384,11 +473,13 @@
 
       if (!regions.length) {
         selectedRegionKey = '';
+        selectedRegionKeysByMode[currentMode] = '';
         return '';
       }
 
       const matchingRegion = regions.find((region) => region.key === previousSelection);
       selectedRegionKey = matchingRegion ? matchingRegion.key : regions[0].key;
+      selectedRegionKeysByMode[currentMode] = selectedRegionKey;
       regionSelect.value = selectedRegionKey;
       return selectedRegionKey;
     }
@@ -563,7 +654,7 @@
     async function renderFrame(index) {
       const frame = currentFrames[index];
       if (!frame) {
-        renderEmpty('No archived PNGs found for this region.');
+        renderEmpty(getEmptyMessage(currentMode));
         return;
       }
 
@@ -594,38 +685,66 @@
       }
     }
 
-    async function loadRegions() {
-      showLoading('Loading regions', 'Checking the archive for saved radar frames.', 0, 0);
-      const response = await fetch('/api/regions', { cache: 'no-store' });
-      const payload = await response.json();
+    async function fetchViewerOptions() {
+      const response = await fetch('/api/viewer-options', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error('Unable to load viewer options');
+      }
 
-      if (payload.regions.length === 0) {
+      viewerOptions = await response.json();
+      return viewerOptions;
+    }
+
+    async function loadViewerMode(mode, preserveSelection = false) {
+      setActiveMode(mode);
+      const regions = getCurrentModeRegions();
+      const regionKey = updateRegionOptions(regions, preserveSelection);
+
+      if (!regionKey) {
+        renderEmpty(getEmptyMessage(mode));
+        return;
+      }
+
+      await loadFrames(regionKey, preserveSelection);
+    }
+
+    async function loadRegions() {
+      showLoading('Loading archive', 'Checking the archive for saved radar frames.', 0, 0);
+      await fetchViewerOptions();
+
+      const hasBaseRegions = (viewerOptions.regions || []).length > 0;
+      const hasTornadoWarnings = (viewerOptions.warnings?.tornado?.regions || []).length > 0;
+      const hasSevereWarnings = (viewerOptions.warnings?.severe?.regions || []).length > 0;
+
+      if (!hasBaseRegions && !hasTornadoWarnings && !hasSevereWarnings) {
         renderEmpty('No archived PNGs found yet.');
         return;
       }
 
-      const initialRegionKey = updateRegionOptions(payload.regions, false);
-      await loadFrames(initialRegionKey);
+      const initialMode = hasBaseRegions ? 'regions' : (hasTornadoWarnings ? 'tornado' : 'severe');
+      await loadViewerMode(initialMode, false);
     }
 
     async function loadFrames(regionKey, preservePosition = false) {
-      showLoading('Loading region archive', 'Preparing saved radar PNGs for the selected region.', 0, 0);
+      const archiveLabel = currentMode === 'regions' ? 'region archive' : 'warning archive';
+      showLoading('Loading archive', `Preparing saved radar PNGs for the selected ${archiveLabel}.`, 0, 0);
 
       const response = await fetch(`/api/frames/${regionKey}`, { cache: 'no-store' });
       if (!response.ok) {
-        renderEmpty('Unable to load frames for this region.');
+        renderEmpty(`Unable to load frames for this ${currentMode === 'regions' ? 'region' : 'warning area'}.`);
         return;
       }
 
       const payload = await response.json();
       selectedRegionKey = regionKey;
-        activeRegionToken = `${regionKey}:${Date.now()}`;
-        clearFrameState();
+      selectedRegionKeysByMode[currentMode] = regionKey;
+      activeRegionToken = `${currentMode}:${regionKey}:${Date.now()}`;
+      clearFrameState();
       const previousFilename = preservePosition ? currentFrames[currentFrameIndex]?.filename : null;
       currentFrames = payload.frames;
 
       if (currentFrames.length === 0) {
-        renderEmpty('No archived PNGs found for this region.');
+        renderEmpty(getEmptyMessage(currentMode));
         return;
       }
 
@@ -648,16 +767,11 @@
 
     async function refreshArchiveData() {
       try {
-        const regionResponse = await fetch('/api/regions', { cache: 'no-store' });
-        if (!regionResponse.ok) {
-          return;
-        }
-
+        await fetchViewerOptions();
         const previousRegionKey = selectedRegionKey;
-        const regionPayload = await regionResponse.json();
-        const currentRegionKey = updateRegionOptions(regionPayload.regions, true);
+        const currentRegionKey = updateRegionOptions(getCurrentModeRegions(), true);
         if (!currentRegionKey) {
-          renderEmpty('No archived PNGs found yet.');
+          renderEmpty(getEmptyMessage(currentMode));
           return;
         }
 
@@ -678,7 +792,7 @@
           return;
         }
 
-        activeRegionToken = `${currentRegionKey}:${Date.now()}`;
+        activeRegionToken = `${currentMode}:${currentRegionKey}:${Date.now()}`;
         if (regionChanged) {
           clearFrameState();
         }
@@ -687,7 +801,7 @@
         currentFrames = nextFrames;
 
         if (!currentFrames.length) {
-          renderEmpty('No archived PNGs found for this region.');
+          renderEmpty(getEmptyMessage(currentMode));
           return;
         }
 
@@ -720,6 +834,18 @@
       followLatestFrame = true;
       await loadFrames(event.target.value);
     });
+
+    for (const button of modeButtons) {
+      button.addEventListener('click', async () => {
+        const nextMode = button.dataset.modeButton;
+        if (!nextMode || nextMode === currentMode) {
+          return;
+        }
+
+        followLatestFrame = true;
+        await loadViewerMode(nextMode, true);
+      });
+    }
 
     frameSlider.addEventListener('input', (event) => {
       void renderFrame(Number(event.target.value));
