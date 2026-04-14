@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import gzip
+import json
 import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -40,8 +41,10 @@ REGION_PADDING_FRACTION = 0.05
 WARNING_REGION_PADDING_FRACTION = 0.18
 WARNING_REGION_MIN_SPAN_DEGREES = 5.0
 WARNING_CLUSTER_DISTANCE_DEGREES = 3.5
+WARNING_REGION_KEY_SNAP_DEGREES = 1.0
 STANDARD_RETENTION_DAYS = 10
 WARNING_RETENTION_DAYS: int | None = 90
+WARNING_REGION_PREFIX = "warning_region"
 NWS_REQUEST_HEADERS = {
     "Accept": "application/geo+json",
     "User-Agent": "RadarArchiverWebsite/1.0 (contact: local-use)",
@@ -60,19 +63,6 @@ WARNING_EVENT_STYLES: dict[str, dict[str, object]] = {
         "label": "Severe Tstm Warning",
     },
 }
-WARNING_REGION_DEFINITIONS: dict[str, dict[str, str]] = {
-    "tornado_warnings": {
-        "event": "Tornado Warning",
-        "label": "Tornado Warnings",
-        "title": "Tornado Warning Focus",
-    },
-    "severe_thunderstorm_warnings": {
-        "event": "Severe Thunderstorm Warning",
-        "label": "Severe Thunderstorm Warnings",
-        "title": "Severe Thunderstorm Warning Focus",
-    },
-}
-
 NORTHEAST_STATE_NAMES = [
     "Maine", "New Hampshire", "Vermont", "Massachusetts", "Rhode Island", "Connecticut",
     "New York", "New Jersey", "Pennsylvania", "Ohio", "Virginia", "Maryland", "Delaware",
@@ -360,7 +350,8 @@ def build_warning_cluster_geometries(event_warnings: gpd.GeoDataFrame) -> list[o
     cluster_geometries: list[object] = []
 
     while unclustered_indices:
-        seed_index = unclustered_indices.pop()
+        seed_index = min(unclustered_indices)
+        unclustered_indices.remove(seed_index)
         cluster_indices = {seed_index}
         pending_indices = [seed_index]
 
@@ -380,6 +371,13 @@ def build_warning_cluster_geometries(event_warnings: gpd.GeoDataFrame) -> list[o
 
         cluster_geometries.append(event_warnings.iloc[sorted(cluster_indices)].union_all())
 
+    cluster_geometries.sort(
+        key=lambda geometry: (
+            round(float(geometry.centroid.y), 3),
+            round(float(geometry.centroid.x), 3),
+        )
+    )
+
     return cluster_geometries
 
 
@@ -391,34 +389,41 @@ def build_warning_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, di
     states = get_census_states_geodataframe()
     region_configs: dict[str, dict[str, object]] = {}
 
-    for region_key, warning_definition in WARNING_REGION_DEFINITIONS.items():
-        event_name = warning_definition["event"]
-        event_warnings = warnings_gdf[warnings_gdf["event"] == event_name].copy()
-        if event_warnings.empty:
+    cluster_geometries = build_warning_cluster_geometries(warnings_gdf)
+    used_region_keys: set[str] = set()
+
+    for cluster_geometry in cluster_geometries:
+        cluster_warnings = warnings_gdf[warnings_gdf.intersects(cluster_geometry)].copy()
+        if cluster_warnings.empty:
             continue
 
-        cluster_geometries = build_warning_cluster_geometries(event_warnings)
-        for cluster_index, cluster_geometry in enumerate(cluster_geometries, start=1):
-            min_lon, min_lat, max_lon, max_lat = cluster_geometry.bounds
-            extent = normalize_extent(
-                float(min_lon),
-                float(max_lon),
-                float(min_lat),
-                float(max_lat),
-                padding_frac=WARNING_REGION_PADDING_FRACTION,
-                min_span_degrees=WARNING_REGION_MIN_SPAN_DEGREES,
-            )
-            region_counties, region_states = subset_geodata_to_extent(counties, states, extent)
-            cluster_region_key = f"{region_key}_{cluster_index}"
-            cluster_label = f"{warning_definition['label']} {cluster_index}"
+        min_lon, min_lat, max_lon, max_lat = cluster_geometry.bounds
+        extent = normalize_extent(
+            float(min_lon),
+            float(max_lon),
+            float(min_lat),
+            float(max_lat),
+            padding_frac=WARNING_REGION_PADDING_FRACTION,
+            min_span_degrees=WARNING_REGION_MIN_SPAN_DEGREES,
+        )
+        region_counties, region_states = subset_geodata_to_extent(counties, states, extent)
+        cluster_region_key = build_warning_region_key(cluster_geometry, used_region_keys)
+        cluster_label = build_warning_region_label(cluster_geometry)
+        event_names = sorted({str(event_name) for event_name in cluster_warnings["event"] if event_name})
 
-            region_configs[cluster_region_key] = {
+        region_configs[cluster_region_key] = {
+            "label": cluster_label,
+            "title": cluster_label,
+            "extent": extent,
+            "counties_gdf": region_counties,
+            "states_gdf": region_states,
+            "metadata": {
+                "key": cluster_region_key,
                 "label": cluster_label,
                 "title": cluster_label,
-                "extent": extent,
-                "counties_gdf": region_counties,
-                "states_gdf": region_states,
-            }
+                "events": event_names,
+            },
+        }
 
     return region_configs
 
@@ -430,10 +435,58 @@ def build_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, 
 
 
 def is_warning_region_key(region_key: str) -> bool:
-    return any(
+    legacy_prefixes = ("tornado_warnings", "severe_thunderstorm_warnings")
+    return region_key.startswith(f"{WARNING_REGION_PREFIX}_") or any(
         region_key == base_region_key or region_key.startswith(f"{base_region_key}_")
-        for base_region_key in WARNING_REGION_DEFINITIONS
+        for base_region_key in legacy_prefixes
     )
+
+
+def snap_warning_coordinate(value: float) -> int:
+    return int(round(value / WARNING_REGION_KEY_SNAP_DEGREES) * WARNING_REGION_KEY_SNAP_DEGREES)
+
+
+def format_warning_coordinate_label(latitude: float, longitude: float) -> str:
+    snapped_latitude = snap_warning_coordinate(latitude)
+    snapped_longitude = snap_warning_coordinate(longitude)
+    lat_suffix = "N" if snapped_latitude >= 0 else "S"
+    lon_suffix = "E" if snapped_longitude >= 0 else "W"
+    return f"{abs(snapped_latitude):02d}{lat_suffix} {abs(snapped_longitude):03d}{lon_suffix}"
+
+
+def build_warning_region_label(cluster_geometry: object) -> str:
+    centroid = cluster_geometry.centroid
+    return f"Warning Area {format_warning_coordinate_label(float(centroid.y), float(centroid.x))}"
+
+
+def build_warning_region_key(cluster_geometry: object, used_region_keys: set[str]) -> str:
+    centroid = cluster_geometry.centroid
+    snapped_latitude = snap_warning_coordinate(float(centroid.y))
+    snapped_longitude = snap_warning_coordinate(float(centroid.x))
+    lat_suffix = "n" if snapped_latitude >= 0 else "s"
+    lon_suffix = "e" if snapped_longitude >= 0 else "w"
+    base_region_key = (
+        f"{WARNING_REGION_PREFIX}_{lat_suffix}{abs(snapped_latitude):02d}_{lon_suffix}{abs(snapped_longitude):03d}"
+    )
+    region_key = base_region_key
+    duplicate_index = 2
+
+    while region_key in used_region_keys:
+        region_key = f"{base_region_key}_{duplicate_index}"
+        duplicate_index += 1
+
+    used_region_keys.add(region_key)
+    return region_key
+
+
+def write_warning_region_metadata(region_key: str, metadata: dict[str, object]) -> None:
+    if not is_warning_region_key(region_key):
+        return
+
+    region_dir = ARCHIVE_ROOT / region_key
+    region_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = region_dir / "metadata.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def build_output_path(output_path: Path, region_key: str) -> Path:
@@ -569,6 +622,7 @@ def plot_radar(
     valid_time: pd.Timestamp,
     output_path: Path,
     show: bool,
+    warning_metadata: dict[str, object] | None = None,
 ) -> Path:
     figure = plt.figure(figsize=(10, 10))
     projection: ccrs.CRS
@@ -677,6 +731,8 @@ def plot_radar(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     archive_output_path = build_archive_output_path(region_key, valid_time)
     archive_output_path.parent.mkdir(parents=True, exist_ok=True)
+    if warning_metadata is not None:
+        write_warning_region_metadata(region_key, warning_metadata)
 
     figure.savefig(archive_output_path, dpi=OUTPUT_DPI, bbox_inches="tight")
     shutil.copy2(archive_output_path, output_path)
@@ -743,6 +799,7 @@ def main() -> None:
             valid_time=valid_time,
             output_path=build_output_path(args.output, region_key),
             show=args.show,
+            warning_metadata=region_config.get("metadata"),
         )
         del lon_grid, lat_grid, reflectivity
         gc.collect()
