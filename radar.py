@@ -40,8 +40,6 @@ EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 REGION_PADDING_FRACTION = 0.05
 WARNING_REGION_PADDING_FRACTION = 0.18
 WARNING_REGION_MIN_SPAN_DEGREES = 5.0
-WARNING_CLUSTER_DISTANCE_DEGREES = 3.5
-WARNING_REGION_KEY_SNAP_DEGREES = 1.0
 STANDARD_RETENTION_DAYS = 10
 WARNING_RETENTION_DAYS: int | None = 90
 WARNING_REGION_PREFIX = "warning_region"
@@ -62,6 +60,10 @@ WARNING_EVENT_STYLES: dict[str, dict[str, object]] = {
         "linewidth": 1.4,
         "label": "Severe Tstm Warning",
     },
+}
+WARNING_EVENT_REGION_KEYS = {
+    "Tornado Warning": "tornado",
+    "Severe Thunderstorm Warning": "severe",
 }
 NORTHEAST_STATE_NAMES = [
     "Maine", "New Hampshire", "Vermont", "Massachusetts", "Rhode Island", "Connecticut",
@@ -341,44 +343,28 @@ def subset_geodata_to_extent(
     return subset_counties, subset_states
 
 
-def build_warning_cluster_geometries(event_warnings: gpd.GeoDataFrame) -> list[object]:
-    if event_warnings.empty:
-        return []
+def slugify_warning_state_name(state_name: str) -> str:
+    slug_characters: list[str] = []
+    for character in state_name.lower():
+        if character.isalnum():
+            slug_characters.append(character)
+        elif character in {" ", "-", "/"}:
+            slug_characters.append("_")
 
-    buffered_geometries = event_warnings.geometry.buffer(WARNING_CLUSTER_DISTANCE_DEGREES / 2.0)
-    unclustered_indices = set(range(len(buffered_geometries)))
-    cluster_geometries: list[object] = []
+    slug = "".join(slug_characters).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "state"
 
-    while unclustered_indices:
-        seed_index = min(unclustered_indices)
-        unclustered_indices.remove(seed_index)
-        cluster_indices = {seed_index}
-        pending_indices = [seed_index]
 
-        while pending_indices:
-            current_index = pending_indices.pop()
-            current_geometry = buffered_geometries.iloc[current_index]
-            nearby_indices = [
-                other_index
-                for other_index in list(unclustered_indices)
-                if current_geometry.intersects(buffered_geometries.iloc[other_index])
-            ]
+def build_warning_region_key(event_name: str, state_name: str) -> str:
+    event_key = WARNING_EVENT_REGION_KEYS.get(event_name, slugify_warning_state_name(event_name))
+    state_key = slugify_warning_state_name(state_name)
+    return f"{WARNING_REGION_PREFIX}_{event_key}_{state_key}"
 
-            for nearby_index in nearby_indices:
-                unclustered_indices.remove(nearby_index)
-                cluster_indices.add(nearby_index)
-                pending_indices.append(nearby_index)
 
-        cluster_geometries.append(event_warnings.iloc[sorted(cluster_indices)].union_all())
-
-    cluster_geometries.sort(
-        key=lambda geometry: (
-            round(float(geometry.centroid.y), 3),
-            round(float(geometry.centroid.x), 3),
-        )
-    )
-
-    return cluster_geometries
+def build_warning_region_title(state_name: str, event_name: str) -> str:
+    return f"{state_name} {event_name}s"
 
 
 def build_warning_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, object]]:
@@ -389,41 +375,51 @@ def build_warning_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, di
     states = get_census_states_geodataframe()
     region_configs: dict[str, dict[str, object]] = {}
 
-    cluster_geometries = build_warning_cluster_geometries(warnings_gdf)
-    used_region_keys: set[str] = set()
-
-    for cluster_geometry in cluster_geometries:
-        cluster_warnings = warnings_gdf[warnings_gdf.intersects(cluster_geometry)].copy()
-        if cluster_warnings.empty:
+    for event_name in WARNING_EVENT_STYLES:
+        event_warnings = warnings_gdf[warnings_gdf["event"] == event_name].copy()
+        if event_warnings.empty:
             continue
 
-        min_lon, min_lat, max_lon, max_lat = cluster_geometry.bounds
-        extent = normalize_extent(
-            float(min_lon),
-            float(max_lon),
-            float(min_lat),
-            float(max_lat),
-            padding_frac=WARNING_REGION_PADDING_FRACTION,
-            min_span_degrees=WARNING_REGION_MIN_SPAN_DEGREES,
-        )
-        region_counties, region_states = subset_geodata_to_extent(counties, states, extent)
-        cluster_region_key = build_warning_region_key(cluster_geometry, used_region_keys)
-        cluster_label = build_warning_region_label(cluster_geometry)
-        event_names = sorted({str(event_name) for event_name in cluster_warnings["event"] if event_name})
+        event_coverage = event_warnings.geometry.unary_union
+        impacted_states = states[states.intersects(event_coverage)].sort_values("NAME").reset_index(drop=True)
 
-        region_configs[cluster_region_key] = {
-            "label": cluster_label,
-            "title": cluster_label,
-            "extent": extent,
-            "counties_gdf": region_counties,
-            "states_gdf": region_states,
-            "metadata": {
-                "key": cluster_region_key,
-                "label": cluster_label,
-                "title": cluster_label,
-                "events": event_names,
-            },
-        }
+        for state_row in impacted_states.itertuples(index=False):
+            state_name = str(state_row.NAME)
+            state_geometry = state_row.geometry
+            state_warnings = event_warnings[event_warnings.intersects(state_geometry)].copy().reset_index(drop=True)
+            if state_warnings.empty:
+                continue
+
+            min_lon, min_lat, max_lon, max_lat = state_geometry.bounds
+            extent = normalize_extent(
+                float(min_lon),
+                float(max_lon),
+                float(min_lat),
+                float(max_lat),
+                padding_frac=WARNING_REGION_PADDING_FRACTION,
+                min_span_degrees=WARNING_REGION_MIN_SPAN_DEGREES,
+            )
+            region_counties, region_states = subset_geodata_to_extent(counties, states, extent)
+            region_key = build_warning_region_key(event_name, state_name)
+            region_title = build_warning_region_title(state_name, event_name)
+
+            region_configs[region_key] = {
+                "label": state_name,
+                "title": region_title,
+                "extent": extent,
+                "counties_gdf": region_counties,
+                "states_gdf": region_states,
+                "warnings_gdf": state_warnings,
+                "metadata": {
+                    "key": region_key,
+                    "label": state_name,
+                    "title": region_title,
+                    "event": event_name,
+                    "events": [event_name],
+                    "grouping": "state",
+                    "state": state_name,
+                },
+            }
 
     return region_configs
 
@@ -440,43 +436,6 @@ def is_warning_region_key(region_key: str) -> bool:
         region_key == base_region_key or region_key.startswith(f"{base_region_key}_")
         for base_region_key in legacy_prefixes
     )
-
-
-def snap_warning_coordinate(value: float) -> int:
-    return int(round(value / WARNING_REGION_KEY_SNAP_DEGREES) * WARNING_REGION_KEY_SNAP_DEGREES)
-
-
-def format_warning_coordinate_label(latitude: float, longitude: float) -> str:
-    snapped_latitude = snap_warning_coordinate(latitude)
-    snapped_longitude = snap_warning_coordinate(longitude)
-    lat_suffix = "N" if snapped_latitude >= 0 else "S"
-    lon_suffix = "E" if snapped_longitude >= 0 else "W"
-    return f"{abs(snapped_latitude):02d}{lat_suffix} {abs(snapped_longitude):03d}{lon_suffix}"
-
-
-def build_warning_region_label(cluster_geometry: object) -> str:
-    centroid = cluster_geometry.centroid
-    return f"Warning Area {format_warning_coordinate_label(float(centroid.y), float(centroid.x))}"
-
-
-def build_warning_region_key(cluster_geometry: object, used_region_keys: set[str]) -> str:
-    centroid = cluster_geometry.centroid
-    snapped_latitude = snap_warning_coordinate(float(centroid.y))
-    snapped_longitude = snap_warning_coordinate(float(centroid.x))
-    lat_suffix = "n" if snapped_latitude >= 0 else "s"
-    lon_suffix = "e" if snapped_longitude >= 0 else "w"
-    base_region_key = (
-        f"{WARNING_REGION_PREFIX}_{lat_suffix}{abs(snapped_latitude):02d}_{lon_suffix}{abs(snapped_longitude):03d}"
-    )
-    region_key = base_region_key
-    duplicate_index = 2
-
-    while region_key in used_region_keys:
-        region_key = f"{base_region_key}_{duplicate_index}"
-        duplicate_index += 1
-
-    used_region_keys.add(region_key)
-    return region_key
 
 
 def write_warning_region_metadata(region_key: str, metadata: dict[str, object]) -> None:
@@ -789,7 +748,7 @@ def main() -> None:
         plot_radar(
             counties=region_config["counties_gdf"],
             states=region_config["states_gdf"],
-            warnings_gdf=warnings_gdf,
+            warnings_gdf=region_config.get("warnings_gdf", warnings_gdf),
             region_key=region_key,
             region_title=str(region_config["title"]),
             subset_extent=extent,
