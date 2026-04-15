@@ -83,9 +83,9 @@ SOUTH_CENTRAL_STATE_NAMES = ["Texas", "Oklahoma", "Arkansas", "Louisiana", "New 
 SOUTH_CENTRAL_STATE_FIPS = ["48", "40", "05", "22", "35"]
 NORTH_CENTRAL_STATE_NAMES = [
     "North Dakota", "South Dakota", "Nebraska", "Kansas", "Minnesota", "Iowa", "Missouri",
-    "Wisconsin", "Illinois", "Michigan",
+    "Wisconsin", "Illinois", "Indiana", "Michigan",
 ]
-NORTH_CENTRAL_STATE_FIPS = ["38", "46", "31", "20", "27", "19", "29", "55", "17", "26"]
+NORTH_CENTRAL_STATE_FIPS = ["38", "46", "31", "20", "27", "19", "29", "55", "17", "18", "26"]
 WESTERN_STATE_NAMES = [
     "Washington", "Oregon", "California", "Nevada", "Idaho", "Montana", "Wyoming", "Utah",
     "Colorado", "Arizona",
