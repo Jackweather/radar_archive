@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import gzip
+import io
 import json
 import shutil
 import tempfile
@@ -21,6 +22,7 @@ import pygrib
 import requests
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
+from PIL import Image
 from shapely.geometry import box
 
 
@@ -36,6 +38,7 @@ CONUS_EXTENT = (-124.0, -67.5, 25.0, 49.5)
 MIN_DBZ = 5.0
 MAX_DBZ = 70.0
 OUTPUT_DPI = 300
+DEFAULT_PNG_MAX_COLORS = 192
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 REGION_PADDING_FRACTION = 0.05
 WARNING_REGION_PADDING_FRACTION = 0.18
@@ -568,6 +571,43 @@ def build_title(valid_time: pd.Timestamp, region_title: str) -> str:
     )
 
 
+def build_optimized_png_bytes(image: Image.Image, max_colors: int) -> bytes:
+    working_image = image.copy()
+    has_alpha = "A" in working_image.getbands() or working_image.info.get("transparency") is not None
+
+    if max_colors > 0:
+        if has_alpha:
+            working_image = working_image.convert("RGBA").quantize(
+                colors=max_colors,
+                method=Image.Quantize.FASTOCTREE,
+                dither=Image.Dither.NONE,
+            )
+        else:
+            working_image = working_image.convert("P", palette=Image.Palette.ADAPTIVE, colors=max_colors)
+
+    output_buffer = io.BytesIO()
+    working_image.save(output_buffer, format="PNG", optimize=True, compress_level=9)
+    return output_buffer.getvalue()
+
+
+def optimize_png_file(path: Path, max_colors: int) -> bool:
+    original_size = path.stat().st_size
+
+    with Image.open(path) as image:
+        optimized_bytes = build_optimized_png_bytes(image, max_colors=max_colors)
+
+    optimized_size = len(optimized_bytes)
+    if optimized_size >= original_size:
+        print(f"PNG optimization skipped for {path}: no size improvement")
+        return False
+
+    path.write_bytes(optimized_bytes)
+    savings = original_size - optimized_size
+    percent = (savings / original_size) * 100 if original_size else 0.0
+    print(f"Optimized PNG for {path}: {original_size} -> {optimized_size} bytes ({percent:.1f}% smaller)")
+    return True
+
+
 def plot_radar(
     counties: gpd.GeoDataFrame,
     states: gpd.GeoDataFrame,
@@ -581,6 +621,7 @@ def plot_radar(
     valid_time: pd.Timestamp,
     output_path: Path,
     show: bool,
+    png_max_colors: int,
     warning_metadata: dict[str, object] | None = None,
 ) -> Path:
     figure = plt.figure(figsize=(10, 10))
@@ -694,6 +735,7 @@ def plot_radar(
         write_warning_region_metadata(region_key, warning_metadata)
 
     figure.savefig(archive_output_path, dpi=OUTPUT_DPI, bbox_inches="tight")
+    optimize_png_file(archive_output_path, max_colors=png_max_colors)
     shutil.copy2(archive_output_path, output_path)
     print(f"Created PNG for {region_key}: {archive_output_path}")
 
@@ -732,11 +774,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Open an interactive plot window after saving the PNG.",
     )
+    parser.add_argument(
+        "--png-max-colors",
+        type=int,
+        default=DEFAULT_PNG_MAX_COLORS,
+        help="Palette size used when optimizing output PNGs. Use 0 to disable quantization. Default: 192.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.png_max_colors < 0 or args.png_max_colors > 256:
+        raise SystemExit("--png-max-colors must be between 0 and 256")
+
     lon_1d, lat_1d, values, valid_time = load_radar_grid(args.radar_url)
     warnings_gdf = fetch_active_warning_polygons()
     region_configs = build_region_configs(warnings_gdf)
@@ -758,6 +809,7 @@ def main() -> None:
             valid_time=valid_time,
             output_path=build_output_path(args.output, region_key),
             show=args.show,
+            png_max_colors=args.png_max_colors,
             warning_metadata=region_config.get("metadata"),
         )
         del lon_grid, lat_grid, reflectivity
