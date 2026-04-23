@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Radar AI Model Lab</title>
+  <style>
+    :root {
+      --bg: #071017;
+      --panel: rgba(10, 18, 26, 0.92);
+      --panel-strong: rgba(12, 24, 35, 0.98);
+      --text: #eef6ff;
+      --muted: #9eb3c8;
+      --accent: #6de0b1;
+      --accent-strong: #aef5d6;
+      --border: rgba(158, 179, 200, 0.18);
+      --warning: #ffcb6b;
+      --danger: #ff8e7a;
+      --shadow: 0 22px 54px rgba(0, 0, 0, 0.28);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(109, 224, 177, 0.14), transparent 28%),
+        radial-gradient(circle at top right, rgba(255, 203, 107, 0.12), transparent 22%),
+        linear-gradient(180deg, #10202b 0%, var(--bg) 42%, #03070c 100%);
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 20px 40px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 26px;
+      flex-wrap: wrap;
+    }
+
+    .title {
+      margin: 0;
+      font-size: clamp(1.8rem, 3vw, 2.5rem);
+      letter-spacing: 0.02em;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      max-width: 760px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .links {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .link-pill,
+    .download {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 16px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      text-decoration: none;
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+
+    .link-pill:hover,
+    .download:hover {
+      transform: translateY(-1px);
+      border-color: rgba(109, 224, 177, 0.42);
+      background: rgba(109, 224, 177, 0.08);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr);
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+
+    .panel h2,
+    .panel h3 {
+      margin-top: 0;
+    }
+
+    .lead {
+      margin: 0 0 18px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .callout {
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 203, 107, 0.22);
+      background: rgba(255, 203, 107, 0.07);
+      color: #ffe6aa;
+      line-height: 1.6;
+    }
+
+    .status-card {
+      background: var(--panel-strong);
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 0.92rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      background: rgba(109, 224, 177, 0.1);
+      color: var(--accent-strong);
+      border: 1px solid rgba(109, 224, 177, 0.2);
+    }
+
+    .status-badge.is-running {
+      background: rgba(255, 203, 107, 0.1);
+      color: #ffe0a1;
+      border-color: rgba(255, 203, 107, 0.24);
+    }
+
+    .status-badge.is-error {
+      background: rgba(255, 142, 122, 0.1);
+      color: #ffc1b4;
+      border-color: rgba(255, 142, 122, 0.24);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }
+
+    .download {
+      cursor: pointer;
+      font: inherit;
+    }
+
+    .download.is-disabled {
+      opacity: 0.45;
+      pointer-events: none;
+      transform: none;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 20px;
+    }
+
+    .metric {
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .metric-label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .metric-value {
+      font-size: 1.3rem;
+      font-weight: 700;
+    }
+
+    .meta-list,
+    .notes,
+    .steps {
+      display: grid;
+      gap: 10px;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+
+    .meta-list li,
+    .notes li,
+    .steps li {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(158, 179, 200, 0.1);
+      line-height: 1.55;
+    }
+
+    .terminal {
+      margin-top: 18px;
+      border-radius: 16px;
+      background: #02060a;
+      border: 1px solid rgba(158, 179, 200, 0.12);
+      padding: 14px;
+      min-height: 160px;
+      white-space: pre-wrap;
+      overflow: auto;
+      color: #c7d9e8;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.88rem;
+    }
+
+    .command-block {
+      margin-top: 18px;
+      border-radius: 16px;
+      background: #02060a;
+      border: 1px solid rgba(158, 179, 200, 0.12);
+      padding: 14px;
+      overflow: auto;
+      color: #d7eadb;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.88rem;
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+
+    .section-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+      margin-top: 20px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    @media (max-width: 920px) {
+      .hero,
+      .section-grid,
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <div>
+        <h1 class="title">Radar AI Model Lab</h1>
+        <p class="subtitle">Train one downloadable model artifact from the archived MRMS GRIB files already connected to this site. The current version learns a severe-likelihood score from reflectivity intensity and storm-core coverage.</p>
+      </div>
+      <div class="links">
+        <a class="link-pill" href="/">Viewer</a>
+        <a class="link-pill" href="/vault-archive">GRIB Vault</a>
+      </div>
+    </div>
+
+    <section class="hero">
+      <article class="panel">
+        <h2>What This Trains</h2>
+        <p class="lead">This model is a lightweight logistic regression artifact saved as a single JSON file. It does not need scikit-learn at runtime and can be read later by Python code directly.</p>
+        <div class="callout">Current limitation: this first version learns from radar reflectivity patterns alone. It is useful as a storm-severity scorer, but it is not yet a true warning model because it has no storm-report or warning labels.</div>
+        <ul class="steps" style="margin-top: 18px;">
+          <li>Read every available GRIB file under the archive path.</li>
+          <li>Sample strong and weak reflectivity neighborhoods from each file.</li>
+          <li>Fit one portable model file: <strong>radar_severe_model.json</strong>.</li>
+        </ul>
+        <div id="trainingCommand" class="command-block">Loading manual training command…</div>
+      </article>
+
+      <aside class="panel status-card">
+        <h2>Model Status</h2>
+        <div id="statusBadge" class="status-badge">Idle</div>
+        <p id="statusMessage" class="lead" style="margin-top: 14px;">This page cannot run training. Use the Python command shown on the left, then return here to download the saved model file.</p>
+        <div class="button-row">
+          <a id="downloadButton" class="download is-disabled" href="/ai-model/download">Download Model</a>
+        </div>
+        <ul class="meta-list" style="margin-top: 18px;">
+          <li><strong>Training mode:</strong> <span class="muted">Manual only</span></li>
+          <li><strong>Model file:</strong> <span id="modelFileStatus" class="muted">Not available</span></li>
+          <li><strong>Last error:</strong> <span id="lastError" class="muted">None</span></li>
+        </ul>
+        <div id="trainOutput" class="terminal">Run the Python training command manually. When the JSON file exists, this page will show its metadata and enable download.</div>
+      </aside>
+    </section>
+
+    <section class="panel">
+      <h2>Current Model</h2>
+      <p class="lead">The trained artifact stores feature scaling, weights, threshold, and validation metrics in one file so it can be reused elsewhere without retraining.</p>
+      <div class="grid">
+        <div class="metric">
+          <span class="metric-label">Artifact</span>
+          <span id="metricFilename" class="metric-value">Not trained</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">GRIB Files Seen</span>
+          <span id="metricFilesSeen" class="metric-value">0</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Samples</span>
+          <span id="metricSamples" class="metric-value">0</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Validation F1</span>
+          <span id="metricF1" class="metric-value">0.0000</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-grid">
+      <article class="panel">
+        <h3>Stored Metadata</h3>
+        <ul id="modelMeta" class="meta-list">
+          <li>No trained model found yet.</li>
+        </ul>
+      </article>
+
+      <article class="panel">
+        <h3>Notes</h3>
+        <ul id="modelNotes" class="notes">
+          <li>Training has not produced a model file yet.</li>
+        </ul>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const statusBadge = document.getElementById('statusBadge');
+    const statusMessage = document.getElementById('statusMessage');
+    const downloadButton = document.getElementById('downloadButton');
+    const modelFileStatus = document.getElementById('modelFileStatus');
+    const lastError = document.getElementById('lastError');
+    const trainOutput = document.getElementById('trainOutput');
+    const trainingCommand = document.getElementById('trainingCommand');
+    const metricFilename = document.getElementById('metricFilename');
+    const metricFilesSeen = document.getElementById('metricFilesSeen');
+    const metricSamples = document.getElementById('metricSamples');
+    const metricF1 = document.getElementById('metricF1');
+    const modelMeta = document.getElementById('modelMeta');
+    const modelNotes = document.getElementById('modelNotes');
+
+    function formatTimestamp(value) {
+      if (!value) {
+        return 'Never';
+      }
+
+      const timestamp = new Date(value);
+      if (Number.isNaN(timestamp.getTime())) {
+        return value;
+      }
+
+      return timestamp.toLocaleString();
+    }
+
+    function setStatusBadge(state, hasError) {
+      statusBadge.classList.toggle('is-running', state === 'Manual only');
+      statusBadge.classList.toggle('is-error', hasError);
+      statusBadge.textContent = state;
+    }
+
+    function renderModel(model) {
+      if (!model) {
+        metricFilename.textContent = 'Not trained';
+        metricFilesSeen.textContent = '0';
+        metricSamples.textContent = '0';
+        metricF1.textContent = '0.0000';
+        modelFileStatus.textContent = 'Not available';
+        downloadButton.classList.add('is-disabled');
+        modelMeta.innerHTML = '<li>No trained model found yet.</li>';
+        modelNotes.innerHTML = '<li>Training has not produced a model file yet.</li>';
+        return;
+      }
+
+      downloadButton.classList.remove('is-disabled');
+  modelFileStatus.textContent = model.filename || 'radar_severe_model.json';
+      metricFilename.textContent = model.filename || 'radar_severe_model.json';
+      metricFilesSeen.textContent = String(model.gribFilesSeen ?? 0);
+      metricSamples.textContent = String(model.sampleCount ?? 0);
+      metricF1.textContent = String(model.validationMetrics?.f1 ?? 0).padEnd(6, '0');
+
+      modelMeta.innerHTML = `
+        <li><strong>Model name:</strong> ${model.modelName || 'Unknown'}</li>
+        <li><strong>Created:</strong> ${formatTimestamp(model.createdAt)}</li>
+        <li><strong>Type:</strong> ${model.modelType || 'Unknown'}</li>
+        <li><strong>Threshold:</strong> ${model.decisionThreshold ?? 'n/a'}</li>
+        <li><strong>Files used:</strong> ${model.gribFilesUsed ?? 0}</li>
+        <li><strong>Positive / negative samples:</strong> ${model.positiveSamples ?? 0} / ${model.negativeSamples ?? 0}</li>
+      `;
+
+      const notes = Array.isArray(model.notes) && model.notes.length
+        ? model.notes
+        : ['No model notes were stored.'];
+      modelNotes.innerHTML = notes.map((note) => `<li>${note}</li>`).join('');
+    }
+
+    function renderStatus(payload) {
+      const hasError = Boolean(payload.lastError);
+      const state = hasError ? 'Error' : 'Manual only';
+      setStatusBadge(state, hasError);
+
+      if (payload.model) {
+        statusMessage.textContent = 'A trained model artifact is available to download.';
+      } else {
+        statusMessage.textContent = 'This page cannot run training. Use the Python command shown on the left, then refresh or return here after the JSON model file is created.';
+      }
+
+      lastError.textContent = payload.lastError || 'None';
+      trainOutput.textContent = payload.lastOutput || 'Run the Python training command manually. When the JSON file exists, this page will show its metadata and enable download.';
+      trainingCommand.textContent = payload.trainingCommand || 'python train_radar_ai.py --archive-root /var/data/mrms_grib_archive --output /var/data/ai_models/radar_severe_model.json';
+      renderModel(payload.model);
+    }
+
+    async function refreshStatus() {
+      const response = await fetch('/api/ai-model/status', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error('Unable to load model status');
+      }
+      const payload = await response.json();
+      renderStatus(payload);
+    }
+
+    refreshStatus().catch(() => {
+      statusBadge.textContent = 'Unavailable';
+      statusBadge.classList.add('is-error');
+      statusMessage.textContent = 'Unable to load AI model status.';
+    });
+    window.setInterval(() => {
+      refreshStatus().catch(() => undefined);
+    }, 5000);
+  </script>
+</body>
+</html>
