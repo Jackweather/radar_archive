@@ -302,6 +302,36 @@
       outline: none;
     }
 
+    .bottom-links {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .bottom-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(157, 177, 204, 0.2);
+      background: rgba(6, 13, 25, 0.72);
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.82rem;
+      letter-spacing: 0.02em;
+      transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+    }
+
+    .bottom-link:hover,
+    .bottom-link:focus {
+      border-color: rgba(102, 217, 239, 0.42);
+      background: rgba(8, 16, 30, 0.9);
+      transform: translateY(-1px);
+      outline: none;
+    }
+
     @keyframes spin {
       to {
         transform: rotate(360deg);
@@ -375,7 +405,11 @@
       <div class="footer-meta">
         <div><strong id="frame-position">0 / 0</strong></div>
         <div id="frame-time">No frame selected</div>
-        <div>Use the slider or arrow keys to move through time.</div>
+          <div class="bottom-links">
+            <span>Use the slider or arrow keys to move through time.</span>
+            <a class="bottom-link" href="/vault-archive">GRIB Vault</a>
+            <a class="bottom-link" href="/ai-model">AI Model</a>
+          </div>
       </div>
     </section>
   </div>
