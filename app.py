@@ -17,6 +17,9 @@ BASE_DIR = Path("/var/data")
 ARCHIVE_ROOT = BASE_DIR / "mrms_radar_archive"
 GRIB_ARCHIVE_ROOT = BASE_DIR / "mrms_grib_archive"
 LOG_ROOT = BASE_DIR / "logs"
+AI_MODEL_ROOT = BASE_DIR / "ai_models"
+AI_MODEL_PATH = AI_MODEL_ROOT / "radar_severe_model.json"
+AI_MODEL_SCRIPT = Path(__file__).with_name("train_radar_ai.py")
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 TIMESTAMP_PATTERN = re.compile(r"(\d{8}_\d{4})$")
 WARNING_REGION_PREFIX = "warning_region_"
@@ -288,9 +291,59 @@ def list_grib_inventory() -> list[dict[str, object]]:
     return inventory
 
 
+def serialize_datetime(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def load_ai_model_summary() -> dict[str, object] | None:
+    if not AI_MODEL_PATH.exists():
+        return None
+
+    try:
+        payload = json.loads(AI_MODEL_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    training_summary = payload.get("trainingSummary", {})
+    validation_metrics = training_summary.get("validationMetrics", {})
+    return {
+        "filename": AI_MODEL_PATH.name,
+        "sizeBytes": AI_MODEL_PATH.stat().st_size,
+        "createdAt": payload.get("createdAt"),
+        "modelName": payload.get("modelName"),
+        "modelType": payload.get("modelType"),
+        "decisionThreshold": payload.get("decisionThreshold"),
+        "gribFilesSeen": training_summary.get("gribFilesSeen"),
+        "gribFilesUsed": training_summary.get("gribFilesUsed"),
+        "sampleCount": training_summary.get("sampleCount"),
+        "positiveSamples": training_summary.get("positiveSamples"),
+        "negativeSamples": training_summary.get("negativeSamples"),
+        "validationMetrics": validation_metrics,
+        "notes": payload.get("notes", []),
+    }
+
+
+def ai_model_status_payload() -> dict[str, object]:
+    return {
+        "running": False,
+        "lastStartedAt": None,
+        "lastFinishedAt": None,
+        "lastError": None,
+        "lastOutput": None,
+        "trainingMode": "manual_only",
+        "trainingCommand": f'{sys.executable} {AI_MODEL_SCRIPT.name} --archive-root {GRIB_ARCHIVE_ROOT} --output {AI_MODEL_PATH}',
+        "model": load_ai_model_summary(),
+    }
+
+
 @app.route("/")
 def index() -> str:
     return render_template("index.html")
+
+
+@app.route("/ai-model")
+def ai_model_lab() -> str:
+    return render_template("model_lab.html", model=load_ai_model_summary())
 
 
 @app.route("/vault-archive")
@@ -321,6 +374,20 @@ def api_viewer_options():
     return jsonify(list_viewer_options())
 
 
+@app.route("/api/ai-model/status")
+def api_ai_model_status():
+    return jsonify(ai_model_status_payload())
+
+
+@app.route("/api/ai-model/train", methods=["POST"])
+def api_ai_model_train():
+    status_code = 403
+    message = "Model training must be run manually from Python, not from the webpage."
+    payload = ai_model_status_payload()
+    payload["message"] = message
+    return jsonify(payload), status_code
+
+
 @app.route("/api/frames/<region_key>")
 def api_frames(region_key: str):
     region_dir = ARCHIVE_ROOT / region_key
@@ -343,6 +410,13 @@ def serve_grib_file(date_key: str, filename: str):
     if not date_dir.exists():
         abort(404, description="Unknown GRIB date")
     return send_from_directory(date_dir, filename, as_attachment=True)
+
+
+@app.route("/ai-model/download")
+def download_ai_model():
+    if not AI_MODEL_PATH.exists():
+        abort(404, description="No trained model is available yet")
+    return send_from_directory(AI_MODEL_ROOT, AI_MODEL_PATH.name, as_attachment=True)
 
 
 if __name__ == "__main__":
