@@ -7,12 +7,15 @@ from pathlib import Path
 
 import numpy as np
 import pygrib
+from scipy.ndimage import maximum_filter
 
 
 DEFAULT_ARCHIVE_ROOT = Path("/var/data/mrms_grib_archive")
 DEFAULT_OUTPUT_PATH = Path("/var/data/ai_models/radar_severe_model.json")
 DEFAULT_SAMPLES_PER_CLASS = 64
 DEFAULT_RANDOM_SEED = 42
+DEFAULT_FORECAST_HOURS = 2.0
+DEFAULT_FUTURE_NEIGHBORHOOD_RADIUS = 8
 MAX_DBZ = 80.0
 POSITIVE_DBZ_THRESHOLD = 45.0
 NEGATIVE_DBZ_THRESHOLD = 20.0
@@ -55,6 +58,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RANDOM_SEED,
         help="Random seed for reproducible sampling.",
     )
+    parser.add_argument(
+        "--forecast-hours",
+        type=float,
+        default=DEFAULT_FORECAST_HOURS,
+        help="Forecast lead window used to label future severe outcomes. Default: 2.0.",
+    )
+    parser.add_argument(
+        "--future-neighborhood-radius",
+        type=int,
+        default=DEFAULT_FUTURE_NEIGHBORHOOD_RADIUS,
+        help="Neighborhood radius in pixels used when looking for future severe reflectivity. Default: 8.",
+    )
     return parser.parse_args()
 
 
@@ -73,6 +88,10 @@ def load_reflectivity(path: Path) -> tuple[np.ndarray, str]:
     finally:
         grib_file.close()
     return values, valid_time
+
+
+def parse_valid_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def sample_positions(mask: np.ndarray, max_count: int, rng: np.random.Generator) -> np.ndarray:
@@ -125,15 +144,37 @@ def is_negative_example(features: np.ndarray) -> bool:
     return bool(window_max < 30.0 and window_mean < 20.0 and fraction_ge_35 == 0.0 and fraction_ge_50 == 0.0)
 
 
+def build_future_target_grid(
+    future_values: np.ndarray,
+    neighborhood_radius: int,
+) -> np.ndarray:
+    valid_future = np.where(future_values > INVALID_DBZ_THRESHOLD, np.clip(future_values, 0.0, MAX_DBZ), 0.0)
+    size = (neighborhood_radius * 2) + 1
+    return maximum_filter(valid_future, size=size, mode="constant", cval=0.0).astype(np.float32)
+
+
+def future_positive_label(future_max_dbz: float) -> bool:
+    return future_max_dbz >= 50.0
+
+
+def future_negative_label(future_max_dbz: float) -> bool:
+    return future_max_dbz < 30.0
+
+
 def collect_training_rows(
-    values: np.ndarray,
+    current_values: np.ndarray,
+    future_target_grid: np.ndarray,
     samples_per_class: int,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
-    positive_candidates = sample_positions(values >= POSITIVE_DBZ_THRESHOLD, samples_per_class * 4, rng)
+    positive_candidates = sample_positions(
+        (current_values >= POSITIVE_DBZ_THRESHOLD) | (future_target_grid >= 50.0),
+        samples_per_class * 6,
+        rng,
+    )
     negative_candidates = sample_positions(
-        (values >= 0.0) & (values < NEGATIVE_DBZ_THRESHOLD),
-        samples_per_class * 4,
+        (current_values >= 0.0) & (current_values < NEGATIVE_DBZ_THRESHOLD) & (future_target_grid < 30.0),
+        samples_per_class * 6,
         rng,
     )
 
@@ -144,8 +185,11 @@ def collect_training_rows(
     for row, col in positive_candidates:
         if positive_count >= samples_per_class:
             break
-        features = extract_features(values, int(row), int(col))
-        if features is None or not is_positive_example(features):
+        features = extract_features(current_values, int(row), int(col))
+        if features is None:
+            continue
+        future_max_dbz = float(future_target_grid[int(row), int(col)])
+        if not future_positive_label(future_max_dbz):
             continue
         feature_rows.append(features)
         labels.append(1)
@@ -155,8 +199,11 @@ def collect_training_rows(
     for row, col in negative_candidates:
         if negative_count >= samples_per_class:
             break
-        features = extract_features(values, int(row), int(col))
-        if features is None or not is_negative_example(features):
+        features = extract_features(current_values, int(row), int(col))
+        if features is None:
+            continue
+        future_max_dbz = float(future_target_grid[int(row), int(col)])
+        if not future_negative_label(future_max_dbz):
             continue
         feature_rows.append(features)
         labels.append(0)
@@ -247,6 +294,8 @@ def evaluate_model(
 def build_dataset(
     grib_files: list[Path],
     samples_per_class: int,
+    forecast_hours: float,
+    future_neighborhood_radius: int,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, list[str], int]:
     feature_batches: list[np.ndarray] = []
@@ -254,17 +303,36 @@ def build_dataset(
     valid_times: list[str] = []
     files_with_samples = 0
 
-    for index, grib_path in enumerate(grib_files, start=1):
-        values, valid_time = load_reflectivity(grib_path)
-        features, labels = collect_training_rows(values, samples_per_class=samples_per_class, rng=rng)
+    loaded_frames = [(path, *load_reflectivity(path)) for path in grib_files]
+
+    for index, (grib_path, values, valid_time) in enumerate(loaded_frames, start=1):
+        current_time = parse_valid_time(valid_time)
+        future_frames = [
+            future_values
+            for _, future_values, future_time in loaded_frames[index:]
+            if 0.0 < (parse_valid_time(future_time) - current_time).total_seconds() / 3600.0 <= forecast_hours
+        ]
+        if not future_frames:
+            if index == 1 or index % 100 == 0 or index == len(loaded_frames):
+                print(f"Processed {index} / {len(loaded_frames)} GRIB files")
+            continue
+
+        future_stack = np.stack(future_frames)
+        future_max_grid = build_future_target_grid(np.max(future_stack, axis=0), neighborhood_radius=future_neighborhood_radius)
+        features, labels = collect_training_rows(
+            values,
+            future_max_grid,
+            samples_per_class=samples_per_class,
+            rng=rng,
+        )
         if len(labels):
             feature_batches.append(features)
             label_batches.append(labels)
             valid_times.append(valid_time)
             files_with_samples += 1
 
-        if index == 1 or index % 100 == 0 or index == len(grib_files):
-            print(f"Processed {index} / {len(grib_files)} GRIB files")
+        if index == 1 or index % 100 == 0 or index == len(loaded_frames):
+            print(f"Processed {index} / {len(loaded_frames)} GRIB files")
 
     if not feature_batches:
         return (
@@ -309,6 +377,8 @@ def save_model(
     labels: np.ndarray,
     valid_times: list[str],
     samples_per_class: int,
+    forecast_hours: float,
+    future_neighborhood_radius: int,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     positive_count = int(np.sum(labels == 1))
@@ -316,8 +386,9 @@ def save_model(
 
     payload = {
         "artifactVersion": 1,
-        "modelName": "MRMS Severe Reflectivity Learner",
+        "modelName": "MRMS Future Severe Outlook Learner",
         "modelType": "logistic_regression",
+        "targetType": "future_severe_outlook",
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "archiveRoot": str(archive_root),
         "featureNames": FEATURE_NAMES,
@@ -333,14 +404,16 @@ def save_model(
             "positiveSamples": positive_count,
             "negativeSamples": negative_count,
             "samplesPerClassPerFile": samples_per_class,
+            "forecastLeadHours": forecast_hours,
+            "futureNeighborhoodRadiusPixels": future_neighborhood_radius,
             "firstValidTime": valid_times[0] if valid_times else None,
             "lastValidTime": valid_times[-1] if valid_times else None,
             "validationMetrics": metrics,
         },
         "notes": [
-            "Weakly supervised model: labels are inferred from reflectivity intensity and neighborhood coverage, not human storm reports.",
-            "Use this artifact as a severe-likelihood scorer for radar cells, not as a finished warning generator.",
-            "Better results require more archived GRIB history and real labels such as warnings, reports, or analyst-drawn outlines.",
+            "This model is trained on future radar outcomes rather than current reflectivity intensity.",
+            "Positive labels mean the location is followed by strong nearby reflectivity within the forecast lead window.",
+            "Better results still require more archived GRIB history and real labels such as warnings, reports, or analyst-drawn outlines.",
         ],
     }
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -350,6 +423,10 @@ def main() -> None:
     args = parse_args()
     if args.samples_per_class <= 0:
         raise SystemExit("--samples-per-class must be greater than 0")
+    if args.forecast_hours <= 0:
+        raise SystemExit("--forecast-hours must be greater than 0")
+    if args.future_neighborhood_radius <= 0:
+        raise SystemExit("--future-neighborhood-radius must be greater than 0")
 
     grib_files = list_grib_files(args.archive_root)
     if len(grib_files) < 2:
@@ -359,6 +436,8 @@ def main() -> None:
     features, labels, valid_times, files_with_samples = build_dataset(
         grib_files,
         samples_per_class=args.samples_per_class,
+        forecast_hours=args.forecast_hours,
+        future_neighborhood_radius=args.future_neighborhood_radius,
         rng=rng,
     )
     if len(labels) < 20:
@@ -389,6 +468,8 @@ def main() -> None:
         labels=labels,
         valid_times=valid_times,
         samples_per_class=args.samples_per_class,
+        forecast_hours=args.forecast_hours,
+        future_neighborhood_radius=args.future_neighborhood_radius,
     )
 
     print(f"Saved trained model artifact to {args.output}")
