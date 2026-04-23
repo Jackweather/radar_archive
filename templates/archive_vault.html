@@ -62,6 +62,12 @@
       white-space: nowrap;
     }
 
+    .link-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
     .date-grid {
       display: grid;
       gap: 18px;
@@ -161,7 +167,10 @@
         <h1 class="title">GRIB Vault</h1>
         <p class="subtitle">Direct raw GRIB access grouped by date in <strong>yy-mm-dd</strong> format.</p>
       </div>
-      <a class="back-link" href="/">Back to viewer</a>
+      <div class="link-row">
+        <a class="back-link" href="/ai-model">AI model lab</a>
+        <a class="back-link" href="/">Back to viewer</a>
+      </div>
     </div>
 
     {% if inventory %}
