@@ -906,6 +906,7 @@ def plot_radar(
         axis.add_feature(cfeature.STATES.with_scale("50m"), linewidth=0.6, edgecolor="#4f4f4f", zorder=4)
 
     legend_handles: list[Line2D] = []
+
     region_warnings = warnings_for_extent(warnings_gdf, subset_extent)
     if not region_warnings.empty:
         for event_name, style in WARNING_EVENT_STYLES.items():
@@ -934,6 +935,42 @@ def plot_radar(
             legend_handles.append(
                 Line2D([0], [0], color=style["edgecolor"], linewidth=style["linewidth"], label=style["label"])
             )
+
+            # Draw storm motion for each warning polygon
+            for _, warning_row in event_warnings.iterrows():
+                poly = warning_row.geometry
+                if poly is None or poly.is_empty:
+                    continue
+                min_lon, min_lat, max_lon, max_lat = poly.bounds
+                poly_extent = (
+                    max(CONUS_EXTENT[0], float(min_lon)),
+                    min(CONUS_EXTENT[1], float(max_lon)),
+                    max(CONUS_EXTENT[2], float(min_lat)),
+                    min(CONUS_EXTENT[3], float(max_lat)),
+                )
+                try:
+                    poly_lon_grid, poly_lat_grid, poly_reflectivity = subset_radar_grid(
+                        lon_grid[0], lat_grid[:,0], reflectivity.data, poly_extent
+                    )
+                except Exception:
+                    continue
+                # Mask out points not in the polygon
+                from shapely.geometry import Point
+                mask = np.array([
+                    [poly.contains(Point(lon, lat)) for lon in poly_lon_grid[0]]
+                    for lat in poly_lat_grid[:,0]
+                ])
+                poly_reflectivity = np.ma.masked_where(~mask, poly_reflectivity)
+                # Use the global storm_motion_per_minute for now (could be improved to estimate per-polygon)
+                draw_storm_motion_lines(
+                    axis=axis,
+                    lon_grid=poly_lon_grid,
+                    lat_grid=poly_lat_grid,
+                    reflectivity=poly_reflectivity,
+                    subset_extent=poly_extent,
+                    storm_motion_per_minute=storm_motion_per_minute,
+                    forecast_minutes=storm_motion_forecast_minutes,
+                )
 
     cmap, norm = build_radar_colormap()
 
