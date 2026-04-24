@@ -43,6 +43,11 @@ EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 REGION_PADDING_FRACTION = 0.05
 WARNING_REGION_PADDING_FRACTION = 0.18
 WARNING_REGION_MIN_SPAN_DEGREES = 5.0
+STORM_MOTION_DBZ_THRESHOLD = 30.0
+STORM_MOTION_TARGET_GRID_SIZE = 160
+STORM_MOTION_MIN_ACTIVE_PIXELS = 12
+STORM_MOTION_LOOKAHEAD_MINUTES = 30.0
+STORM_MOTION_MAX_TIME_DELTA_MINUTES = 30.0
 STANDARD_RETENTION_DAYS = 10
 WARNING_RETENTION_DAYS: int | None = 90
 WARNING_REGION_PREFIX = "warning_region"
@@ -428,7 +433,11 @@ def build_warning_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, di
 
 
 def build_region_configs(warnings_gdf: gpd.GeoDataFrame) -> dict[str, dict[str, object]]:
-    region_configs = dict(BASE_REGION_CONFIGS)
+    region_configs = {
+        region_key: region_config
+        for region_key, region_config in BASE_REGION_CONFIGS.items()
+        if region_key != "conus"
+    }
     region_configs.update(build_warning_region_configs(warnings_gdf))
     return region_configs
 
@@ -509,36 +518,175 @@ def prune_radar_archives(archive_root: Path) -> None:
     prune_empty_directories(archive_root)
 
 
-def load_radar_grid(url: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.Timestamp]:
-    response = requests.get(url, timeout=120)
-    response.raise_for_status()
+def download_and_archive_grib(url: str) -> tuple[Path, pd.Timestamp]:
+    valid_time: pd.Timestamp
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         compressed_path = temp_path / "mrms.grib2.gz"
         grib_path = temp_path / "mrms.grib2"
-        compressed_path.write_bytes(response.content)
+
+        with requests.get(url, stream=True, timeout=120) as response:
+            response.raise_for_status()
+            with compressed_path.open("wb") as compressed_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        compressed_file.write(chunk)
 
         with gzip.open(compressed_path, "rb") as src, grib_path.open("wb") as dst:
-            dst.write(src.read())
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
 
         grib_file = pygrib.open(str(grib_path))
-        message = grib_file.message(1)
-        values = np.asarray(message.values, dtype=np.float32)
-        valid_time = pd.Timestamp(message.validDate, tz="UTC")
-        latitudes, longitudes = message.latlons()
-        grib_file.close()
+        try:
+            message = grib_file.message(1)
+            valid_time = pd.Timestamp(message.validDate, tz="UTC")
+        finally:
+            grib_file.close()
 
         grib_archive_path = build_grib_archive_path(valid_time)
         grib_archive_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(grib_path, grib_archive_path)
         print(f"Archived GRIB: {grib_archive_path}")
 
-    lon_1d = longitudes[0].astype(np.float32, copy=True)
-    lon_1d = np.where(lon_1d > 180.0, lon_1d - 360.0, lon_1d)
-    lat_1d = latitudes[:, 0].astype(np.float32, copy=True)
+    return grib_archive_path, valid_time
 
-    return lon_1d, lat_1d, values, valid_time
+
+def load_radar_subset(
+    grib_path: Path,
+    subset_extent: tuple[float, float, float, float],
+) -> tuple[np.ndarray, np.ndarray, np.ma.MaskedArray, pd.Timestamp]:
+    min_lon, max_lon, min_lat, max_lat = subset_extent
+    lon_bounds = [lon if lon >= 0.0 else lon + 360.0 for lon in (min_lon, max_lon)]
+
+    grib_file = pygrib.open(str(grib_path))
+    try:
+        message = grib_file.message(1)
+        values, latitudes, longitudes = message.data(
+            lat1=min_lat,
+            lat2=max_lat,
+            lon1=min(lon_bounds),
+            lon2=max(lon_bounds),
+        )
+        valid_time = pd.Timestamp(message.validDate, tz="UTC")
+    finally:
+        grib_file.close()
+
+    if values.size == 0:
+        raise ValueError("The requested extent did not intersect the MRMS grid.")
+
+    lon_grid = np.asarray(longitudes, dtype=np.float32)
+    lon_grid = np.where(lon_grid > 180.0, lon_grid - 360.0, lon_grid)
+    lat_grid = np.asarray(latitudes, dtype=np.float32)
+    reflectivity = np.asarray(values, dtype=np.float32)
+    reflectivity = np.ma.masked_where((reflectivity < MIN_DBZ) | (reflectivity <= -99.0), reflectivity)
+    return lon_grid, lat_grid, reflectivity, valid_time
+
+
+def find_previous_grib_archive(current_grib_path: Path, current_valid_time: pd.Timestamp) -> Path | None:
+    previous_candidates: list[tuple[pd.Timestamp, Path]] = []
+    for archive_path in GRIB_ARCHIVE_ROOT.rglob("*.grib2"):
+        if archive_path == current_grib_path:
+            continue
+
+        timestamp_text = archive_path.stem.removeprefix("mrms_")
+        try:
+            archive_time = pd.Timestamp(datetime.strptime(timestamp_text, "%Y%m%d_%H%M"), tz="UTC")
+        except ValueError:
+            continue
+
+        if archive_time < current_valid_time:
+            previous_candidates.append((archive_time, archive_path))
+
+    if not previous_candidates:
+        return None
+
+    previous_candidates.sort(key=lambda item: item[0])
+    return previous_candidates[-1][1]
+
+
+def build_storm_centroid(
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    reflectivity: np.ma.MaskedArray,
+) -> tuple[float, float] | None:
+    if reflectivity.size == 0:
+        return None
+
+    stride = max(1, int(np.ceil(max(reflectivity.shape) / STORM_MOTION_TARGET_GRID_SIZE)))
+    sampled_reflectivity = np.ma.filled(reflectivity[::stride, ::stride], fill_value=0.0)
+    weights = np.clip(sampled_reflectivity - STORM_MOTION_DBZ_THRESHOLD, 0.0, None).astype(np.float32, copy=False)
+    active_pixel_count = int(np.count_nonzero(weights))
+    if active_pixel_count < STORM_MOTION_MIN_ACTIVE_PIXELS:
+        return None
+
+    total_weight = float(weights.sum())
+    if total_weight <= 0.0:
+        return None
+
+    sampled_lon = lon_grid[::stride, ::stride]
+    sampled_lat = lat_grid[::stride, ::stride]
+    centroid_lon = float((sampled_lon * weights).sum() / total_weight)
+    centroid_lat = float((sampled_lat * weights).sum() / total_weight)
+    return centroid_lon, centroid_lat
+
+
+def clamp_point_to_extent(
+    point: tuple[float, float],
+    subset_extent: tuple[float, float, float, float],
+) -> tuple[float, float]:
+    min_lon, max_lon, min_lat, max_lat = subset_extent
+    point_lon, point_lat = point
+    return (
+        min(max(point_lon, min_lon), max_lon),
+        min(max(point_lat, min_lat), max_lat),
+    )
+
+
+def estimate_storm_motion_line(
+    previous_grib_path: Path | None,
+    valid_time: pd.Timestamp,
+    subset_extent: tuple[float, float, float, float],
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    reflectivity: np.ma.MaskedArray,
+) -> dict[str, tuple[float, float] | float] | None:
+    if previous_grib_path is None:
+        return None
+
+    previous_lon_grid, previous_lat_grid, previous_reflectivity, previous_valid_time = load_radar_subset(
+        previous_grib_path,
+        subset_extent,
+    )
+
+    current_centroid = build_storm_centroid(lon_grid, lat_grid, reflectivity)
+    previous_centroid = build_storm_centroid(previous_lon_grid, previous_lat_grid, previous_reflectivity)
+    del previous_lon_grid, previous_lat_grid, previous_reflectivity
+    gc.collect()
+
+    if current_centroid is None or previous_centroid is None:
+        return None
+
+    delta_minutes = (valid_time - previous_valid_time).total_seconds() / 60.0
+    if delta_minutes <= 0.0 or delta_minutes > STORM_MOTION_MAX_TIME_DELTA_MINUTES:
+        return None
+
+    motion_lon = current_centroid[0] - previous_centroid[0]
+    motion_lat = current_centroid[1] - previous_centroid[1]
+    if abs(motion_lon) < 0.01 and abs(motion_lat) < 0.01:
+        return None
+
+    lookahead_scale = STORM_MOTION_LOOKAHEAD_MINUTES / delta_minutes
+    motion_endpoint = (
+        current_centroid[0] + (motion_lon * lookahead_scale),
+        current_centroid[1] + (motion_lat * lookahead_scale),
+    )
+    motion_endpoint = clamp_point_to_extent(motion_endpoint, subset_extent)
+
+    return {
+        "start": current_centroid,
+        "end": motion_endpoint,
+        "minutes": delta_minutes,
+    }
 
 
 def subset_radar_grid(
@@ -623,6 +771,7 @@ def plot_radar(
     show: bool,
     png_max_colors: int,
     warning_metadata: dict[str, object] | None = None,
+    storm_motion_line: dict[str, tuple[float, float] | float] | None = None,
 ) -> Path:
     figure = plt.figure(figsize=(10, 10))
     projection: ccrs.CRS
@@ -662,9 +811,9 @@ def plot_radar(
     else:
         axis.add_feature(cfeature.STATES.with_scale("50m"), linewidth=0.6, edgecolor="#4f4f4f", zorder=4)
 
+    legend_handles: list[Line2D] = []
     region_warnings = warnings_for_extent(warnings_gdf, subset_extent)
     if not region_warnings.empty:
-        legend_handles: list[Line2D] = []
         for event_name, style in WARNING_EVENT_STYLES.items():
             event_warnings = region_warnings[region_warnings["event"] == event_name]
             if event_warnings.empty:
@@ -692,14 +841,49 @@ def plot_radar(
                 Line2D([0], [0], color=style["edgecolor"], linewidth=style["linewidth"], label=style["label"])
             )
 
-        if legend_handles:
-            axis.legend(
-                handles=legend_handles,
-                loc="lower left",
-                fontsize=8,
-                framealpha=0.88,
-                facecolor="white",
-            )
+    if storm_motion_line is not None:
+        start_lon, start_lat = storm_motion_line["start"]
+        end_lon, end_lat = storm_motion_line["end"]
+        axis.plot(
+            [start_lon, end_lon],
+            [start_lat, end_lat],
+            transform=ccrs.PlateCarree(),
+            color="white",
+            linewidth=3.6,
+            alpha=0.95,
+            zorder=7,
+        )
+        axis.plot(
+            [start_lon, end_lon],
+            [start_lat, end_lat],
+            transform=ccrs.PlateCarree(),
+            color="#1f1f1f",
+            linewidth=2.0,
+            linestyle=(0, (8, 4)),
+            zorder=8,
+        )
+        axis.scatter(
+            [start_lon],
+            [start_lat],
+            transform=ccrs.PlateCarree(),
+            s=24,
+            color="#1f1f1f",
+            edgecolors="white",
+            linewidths=0.8,
+            zorder=9,
+        )
+        legend_handles.append(
+            Line2D([0], [0], color="#1f1f1f", linewidth=2.0, linestyle=(0, (8, 4)), label="Est. 30-min Motion")
+        )
+
+    if legend_handles:
+        axis.legend(
+            handles=legend_handles,
+            loc="lower left",
+            fontsize=8,
+            framealpha=0.88,
+            facecolor="white",
+        )
 
     cmap, norm = build_radar_colormap()
 
@@ -788,14 +972,23 @@ def main() -> None:
     if args.png_max_colors < 0 or args.png_max_colors > 256:
         raise SystemExit("--png-max-colors must be between 0 and 256")
 
-    lon_1d, lat_1d, values, valid_time = load_radar_grid(args.radar_url)
+    grib_archive_path, valid_time = download_and_archive_grib(args.radar_url)
+    previous_grib_path = find_previous_grib_archive(grib_archive_path, valid_time)
     warnings_gdf = fetch_active_warning_polygons()
     region_configs = build_region_configs(warnings_gdf)
 
     for region_key, region_config in region_configs.items():
         print(f"Generating PNG for {region_key}...")
         extent = region_config["extent"]
-        lon_grid, lat_grid, reflectivity = subset_radar_grid(lon_1d, lat_1d, values, extent)
+        lon_grid, lat_grid, reflectivity, _ = load_radar_subset(grib_archive_path, extent)
+        storm_motion_line = estimate_storm_motion_line(
+            previous_grib_path=previous_grib_path,
+            valid_time=valid_time,
+            subset_extent=extent,
+            lon_grid=lon_grid,
+            lat_grid=lat_grid,
+            reflectivity=reflectivity,
+        )
         plot_radar(
             counties=region_config["counties_gdf"],
             states=region_config["states_gdf"],
@@ -811,8 +1004,9 @@ def main() -> None:
             show=args.show,
             png_max_colors=args.png_max_colors,
             warning_metadata=region_config.get("metadata"),
+            storm_motion_line=storm_motion_line,
         )
-        del lon_grid, lat_grid, reflectivity
+        del lon_grid, lat_grid, reflectivity, storm_motion_line
         gc.collect()
 
     prune_radar_archives(ARCHIVE_ROOT)
